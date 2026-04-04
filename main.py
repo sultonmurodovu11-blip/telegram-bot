@@ -28,6 +28,7 @@ def save_movies(movies):
 
 MOVIES = load_movies()
 pending_video = {}
+last_code = {}  # so'nggi qo'shilgan kod
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -41,9 +42,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pending_video[user_id] = ("video", file_id)
         await update.message.reply_text(
             "✅ Video qabul qilindi!\n"
-            "Kod va ma'lumot berish uchun:\n"
-            "/add <kod> <nom> | <sifat> | <til> | <vaqt>\n\n"
-            "Masalan:\n/add 1 Culpa Mia | 1080p | O'zbek | 1:57:36"
+            "Kod berish uchun: /add <raqam>\nMasalan: /add 1"
         )
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -53,9 +52,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pending_video[user_id] = ("document", file_id)
         await update.message.reply_text(
             "✅ Fayl qabul qilindi!\n"
-            "Kod va ma'lumot berish uchun:\n"
-            "/add <kod> <nom> | <sifat> | <til> | <vaqt>\n\n"
-            "Masalan:\n/add 1 Culpa Mia | 1080p | O'zbek | 1:57:36"
+            "Kod berish uchun: /add <raqam>\nMasalan: /add 1"
         )
 
 async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -63,49 +60,86 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id != ADMIN_ID:
         return
     if not context.args:
-        await update.message.reply_text(
-            "Ishlatish:\n/add <kod> <nom> | <sifat> | <til> | <vaqt>\n\n"
-            "Masalan:\n/add 1 Culpa Mia | 1080p | O'zbek | 1:57:36"
-        )
+        await update.message.reply_text("Ishlatish: /add <raqam>")
         return
     if user_id not in pending_video:
         await update.message.reply_text("Avval video yuboring, keyin /add yozing.")
         return
-
     code = context.args[0]
-    rest = " ".join(context.args[1:])
-    parts = [p.strip() for p in rest.split("|")]
-
-    nom = parts[0] if len(parts) > 0 and parts[0] else "Noma'lum"
-    sifat = parts[1] if len(parts) > 1 else "—"
-    til = parts[2] if len(parts) > 2 else "—"
-    vaqt = parts[3] if len(parts) > 3 else "—"
-
     media_type, file_id = pending_video.pop(user_id)
     MOVIES[code] = {
         "type": media_type,
         "file_id": file_id,
-        "nom": nom,
-        "sifat": sifat,
-        "til": til,
-        "vaqt": vaqt
+        "nom": "—",
+        "sifat": "—",
+        "til": "—",
+        "vaqt": "—"
     }
     save_movies(MOVIES)
+    last_code[user_id] = code
     await update.message.reply_text(
-        f"✅ Saqlandi!\n"
-        f"📌 Kod: {code}\n"
-        f"🎬 Nom: {nom}\n"
-        f"📺 Sifat: {sifat}\n"
-        f"🌐 Til: {til}\n"
-        f"⏱ Vaqt: {vaqt}"
+        f"✅ Kod {code} saqlandi!\n\n"
+        f"Qo'shimcha ma'lumot:\n"
+        f"/nom <kino nomi>\n"
+        f"/sifat <1080p>\n"
+        f"/til <O'zbek>\n"
+        f"/davomiylik <1:57:36>"
     )
+
+async def set_nom(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+    code = last_code.get(user_id)
+    if not code or code not in MOVIES:
+        await update.message.reply_text("Avval /add <raqam> yozing.")
+        return
+    MOVIES[code]["nom"] = " ".join(context.args)
+    save_movies(MOVIES)
+    await update.message.reply_text(f"✅ Nom: {MOVIES[code]['nom']}")
+
+async def set_sifat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+    code = last_code.get(user_id)
+    if not code or code not in MOVIES:
+        await update.message.reply_text("Avval /add <raqam> yozing.")
+        return
+    MOVIES[code]["sifat"] = " ".join(context.args)
+    save_movies(MOVIES)
+    await update.message.reply_text(f"✅ Sifat: {MOVIES[code]['sifat']}")
+
+async def set_til(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+    code = last_code.get(user_id)
+    if not code or code not in MOVIES:
+        await update.message.reply_text("Avval /add <raqam> yozing.")
+        return
+    MOVIES[code]["til"] = " ".join(context.args)
+    save_movies(MOVIES)
+    await update.message.reply_text(f"✅ Til: {MOVIES[code]['til']}")
+
+async def set_davomiylik(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+    code = last_code.get(user_id)
+    if not code or code not in MOVIES:
+        await update.message.reply_text("Avval /add <raqam> yozing.")
+        return
+    MOVIES[code]["vaqt"] = " ".join(context.args)
+    save_movies(MOVIES)
+    await update.message.reply_text(f"✅ Davomiylik: {MOVIES[code]['vaqt']}")
 
 async def delete_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
         return
     if not context.args:
-        await update.message.reply_text("Ishlatish: /delete <kod>\nMasalan: /delete 1")
+        await update.message.reply_text("Ishlatish: /delete <kod>")
         return
     code = context.args[0]
     if code not in MOVIES:
@@ -148,6 +182,10 @@ async def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add_movie))
+    app.add_handler(CommandHandler("nom", set_nom))
+    app.add_handler(CommandHandler("sifat", set_sifat))
+    app.add_handler(CommandHandler("til", set_til))
+    app.add_handler(CommandHandler("davomiylik", set_davomiylik))
     app.add_handler(CommandHandler("delete", delete_movie))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
