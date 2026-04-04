@@ -100,6 +100,21 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏱ Vaqt: {vaqt}"
     )
 
+async def delete_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Ishlatish: /delete <kod>\nMasalan: /delete 1")
+        return
+    code = context.args[0]
+    if code not in MOVIES:
+        await update.message.reply_text(f"❌ {code} kodli kino topilmadi.")
+        return
+    del MOVIES[code]
+    save_movies(MOVIES)
+    await update.message.reply_text(f"✅ {code} kodli kino o'chirildi.")
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
@@ -133,6 +148,7 @@ async def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add_movie))
+    app.add_handler(CommandHandler("delete", delete_movie))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
