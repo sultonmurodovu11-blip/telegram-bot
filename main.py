@@ -151,11 +151,11 @@ async def main():
             MessageHandler(filters.Document.ALL & filters.User(ADMIN_ID), handle_document),
         ],
         states={
-            KOD:  [MessageHandler(filters.TEXT & ~filters.COMMAND, get_kod)],
-            NOM:  [MessageHandler(filters.TEXT & ~filters.COMMAND, get_nom)],
-            SIFAT:[MessageHandler(filters.TEXT & ~filters.COMMAND, get_sifat)],
-            TIL:  [MessageHandler(filters.TEXT & ~filters.COMMAND, get_til)],
-            VAQT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_vaqt)],
+            KOD:  [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_kod)],
+            NOM:  [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_nom)],
+            SIFAT:[MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_sifat)],
+            TIL:  [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_til)],
+            VAQT: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_vaqt)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
