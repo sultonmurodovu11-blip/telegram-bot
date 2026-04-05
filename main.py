@@ -1,5 +1,4 @@
 import logging
-import asyncio
 import json
 import os
 from telegram import Update
@@ -9,7 +8,7 @@ from telegram.ext import (
 )
 from keep_alive import keep_alive
 
-BOT_TOKEN = "8666624638:AAHmGnnyuVXTHDKUaTA6syhODSf6DF65Zbw"
+BOT_TOKEN = "8666624638:AAHViGUZ2-eFRdaOsCLFdO_WiUvbb1H9gFU"
 ADMIN_ID = 6102256074
 MOVIES_FILE = "movies.json"
 
@@ -111,11 +110,14 @@ async def delete_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Ishlatish: /delete <kod>")
         return
     code = context.args[0]
-    if code not in MOVIES:
+    movies = load_movies()
+    if code not in movies:
         await update.message.reply_text(f"❌ {code} kodli kino topilmadi.")
         return
-    del MOVIES[code]
-    save_movies(MOVIES)
+    del movies[code]
+    save_movies(movies)
+    MOVIES.clear()
+    MOVIES.update(movies)
     await update.message.reply_text(f"✅ {code} kodli kino o'chirildi.")
 
 # --- FOYDALANUVCHI ---
@@ -142,7 +144,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_document(document=file_id, caption=caption)
 
-async def main():
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     conv = ConversationHandler(
@@ -167,10 +169,7 @@ async def main():
 
     keep_alive()
     print("Bot ishga tushdi...")
-    async with app:
-        await app.start()
-        await app.updater.start_polling()
-        await asyncio.Event().wait()
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
