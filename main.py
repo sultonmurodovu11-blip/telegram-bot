@@ -1,5 +1,4 @@
 import logging
-import json
 import os
 from telegram import Update
 from telegram.ext import (
@@ -7,35 +6,62 @@ from telegram.ext import (
     ConversationHandler, filters, ContextTypes
 )
 from keep_alive import keep_alive
+from pymongo import MongoClient
 
 BOT_TOKEN = "8666624638:AAHViGUZ2-eFRdaOsCLFdO_WiUvbb1H9gFU"
 ADMIN_ID = 6102256074
-MOVIES_FILE = "movies.json"
 
 logging.basicConfig(level=logging.INFO)
 
+# MongoDB ulanish
+MONGO_URL = os.environ.get("MONGO_URL", "mongodb+srv://sultonmurodovu11_db_user:5xpsAE52Lnsx6ECY@cluster0.ownkoxc.mongodb.net/?appName=Cluster0")
+client = MongoClient(MONGO_URL)
+db = client["moviebot"]
+movies_col = db["movies"]
+
 def load_movies():
-    if os.path.exists(MOVIES_FILE):
-        with open(MOVIES_FILE, "r") as f:
-            return json.load(f)
-    return {}
+    movies = {}
+    for doc in movies_col.find():
+        code = doc["code"]
+        movies[code] = {
+            "type": doc["type"],
+            "file_id": doc["file_id"],
+            "nom": doc.get("nom", "—"),
+            "sifat": doc.get("sifat", "—"),
+            "til": doc.get("til", "—"),
+            "vaqt": doc.get("vaqt", "—"),
+        }
+    return movies
 
-def save_movies(movies):
-    with open(MOVIES_FILE, "w") as f:
-        json.dump(movies, f, ensure_ascii=False)
+def save_movie(code, data):
+    movies_col.update_one({"code": code}, {"$set": {**data, "code": code}}, upsert=True)
 
-MOVIES = load_movies()
+def delete_movie_db(code):
+    movies_col.delete_one({"code": code})
 
-# Conversation holatlari
+def movie_exists(code):
+    return movies_col.find_one({"code": code}) is not None
+
+def get_movie(code):
+    doc = movies_col.find_one({"code": code})
+    if not doc:
+        return None
+    return {
+        "type": doc["type"],
+        "file_id": doc["file_id"],
+        "nom": doc.get("nom", "—"),
+        "sifat": doc.get("sifat", "—"),
+        "til": doc.get("til", "—"),
+        "vaqt": doc.get("vaqt", "—"),
+    }
+
 KOD, NOM, SIFAT, TIL, VAQT = range(5)
 
-# --- START ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Salom! Movie HD botiga xush kelibsiz! 🎥\nKino kodini yozing ✍️🗒️"
     )
 
-# --- VIDEO/DOCUMENT qabul qilish ---
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
@@ -78,15 +104,15 @@ async def get_vaqt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d = context.user_data
     d["vaqt"] = update.message.text.strip()
     code = d["kod"]
-    MOVIES[code] = {
+    data = {
         "type": d["file_type"],
         "file_id": d["file_id"],
         "nom": d["nom"],
         "sifat": d["sifat"],
         "til": d["til"],
-        "vaqt": d["vaqt"]
+        "vaqt": d["vaqt"],
     }
-    save_movies(MOVIES)
+    save_movie(code, data)
     await update.message.reply_text(
         f"✅ Saqlandi!\n\n"
         f"📌 Kod: {code}\n"
@@ -101,7 +127,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Bekor qilindi.")
     return ConversationHandler.END
 
-# --- O'CHIRISH ---
 async def delete_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
@@ -110,24 +135,19 @@ async def delete_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Ishlatish: /delete <kod>")
         return
     code = context.args[0]
-    movies = load_movies()
-    if code not in movies:
+    if not movie_exists(code):
         await update.message.reply_text(f"❌ {code} kodli kino topilmadi.")
         return
-    del movies[code]
-    save_movies(movies)
-    MOVIES.clear()
-    MOVIES.update(movies)
+    delete_movie_db(code)
     await update.message.reply_text(f"✅ {code} kodli kino o'chirildi.")
 
-# --- FOYDALANUVCHI ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if not text.isdigit():
         await update.message.reply_text("Kino kodini yozing ✍️🗒️")
         return
     code = text
-    data = MOVIES.get(code)
+    data = get_movie(code)
     if not data:
         await update.message.reply_text(f"❌ {code} kodli kino topilmadi.")
         return
