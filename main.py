@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
@@ -10,6 +11,7 @@ from pymongo import MongoClient
 
 BOT_TOKEN = "8666624638:AAHViGUZ2-eFRdaOsCLFdO_WiUvbb1H9gFU"
 ADMIN_ID = 6102256074
+USER_STATS_CODE = os.environ.get("USER_STATS_CODE", "20102010")
 
 logging.basicConfig(level=logging.INFO)
 
@@ -18,6 +20,7 @@ MONGO_URL = os.environ.get("MONGO_URL", "mongodb+srv://sultonmurodovu11_db_user:
 client = MongoClient(MONGO_URL)
 db = client["moviebot"]
 movies_col = db["movies"]
+users_col = db["users"]
 
 def load_movies():
     movies = {}
@@ -55,12 +58,46 @@ def get_movie(code):
         "vaqt": doc.get("vaqt", "—"),
     }
 
+def track_user(user):
+    if not user or user.id == ADMIN_ID:
+        return
+    now = datetime.now(timezone.utc)
+    users_col.update_one(
+        {"user_id": user.id},
+        {
+            "$set": {
+                "username": user.username,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "last_seen": now,
+            },
+            "$setOnInsert": {
+                "user_id": user.id,
+                "first_seen": now,
+            },
+        },
+        upsert=True,
+    )
+
+def get_user_count():
+    return users_col.count_documents({})
+
 KOD, NOM, SIFAT, TIL, VAQT = range(5)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    track_user(update.effective_user)
     await update.message.reply_text(
         "Salom! Movie HD botiga xush kelibsiz! 🎥\nKino kodini yozing ✍️🗒️"
     )
+
+async def foydalanuvchi_soni(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or user.id != ADMIN_ID:
+        return
+    if not context.args or context.args[0] != USER_STATS_CODE:
+        await update.message.reply_text("Kod noto'g'ri.")
+        return
+    await update.message.reply_text(f"Botdagi foydalanuvchilar soni: {get_user_count()}")
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -142,6 +179,7 @@ async def delete_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ {code} kodli kino o'chirildi.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    track_user(update.effective_user)
     text = update.message.text.strip()
     if not text.isdigit():
         await update.message.reply_text("Kino kodini yozing ✍️🗒️")
@@ -183,6 +221,7 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("foydalanuvchi", foydalanuvchi_soni))
     app.add_handler(CommandHandler("delete", delete_movie))
     app.add_handler(conv)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.User(ADMIN_ID), handle_message))
