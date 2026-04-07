@@ -12,6 +12,7 @@ from pymongo import MongoClient
 BOT_TOKEN = "8666624638:AAHViGUZ2-eFRdaOsCLFdO_WiUvbb1H9gFU"
 ADMIN_ID = 6102256074
 USER_STATS_CODE = os.environ.get("USER_STATS_CODE", "20102010")
+PUBLIC_USER_STATS_COMMAND = os.environ.get("PUBLIC_USER_STATS_COMMAND", "malham777")
 
 logging.basicConfig(level=logging.INFO)
 
@@ -84,6 +85,12 @@ def get_user_count():
 
 KOD, NOM, SIFAT, TIL, VAQT = range(5)
 
+async def send_user_count(update: Update):
+    if not update.message:
+        return
+    track_user(update.effective_user)
+    await update.message.reply_text(f"Botdagi foydalanuvchilar soni: {get_user_count()}")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_user(update.effective_user)
     await update.message.reply_text(
@@ -97,7 +104,10 @@ async def foydalanuvchi_soni(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not context.args or context.args[0] != USER_STATS_CODE:
         await update.message.reply_text("Kod noto'g'ri.")
         return
-    await update.message.reply_text(f"Botdagi foydalanuvchilar soni: {get_user_count()}")
+    await send_user_count(update)
+
+async def public_user_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_user_count(update)
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -222,6 +232,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("foydalanuvchi", foydalanuvchi_soni))
+    app.add_handler(CommandHandler(PUBLIC_USER_STATS_COMMAND, public_user_count))
     app.add_handler(CommandHandler("delete", delete_movie))
     app.add_handler(conv)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.User(ADMIN_ID), handle_message))
