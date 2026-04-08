@@ -4,8 +4,6 @@ import asyncio
 import importlib
 import logging
 import os
-import signal
-import sys
 import time
 from typing import TYPE_CHECKING
 
@@ -36,14 +34,12 @@ filters = None
 MongoClient = None
 PyMongoError = Exception
 
-# Global flag — SIGTERM kelganda bot restart qiladi, o'chirmaydi
-_shutdown_requested = False
-
 
 def ensure_telegram_imports():
     global ApplicationBuilder, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
     if ApplicationBuilder is not None:
         return
+
     telegram_ext = importlib.import_module("telegram.ext")
     ApplicationBuilder = telegram_ext.ApplicationBuilder
     CommandHandler = telegram_ext.CommandHandler
@@ -57,22 +53,23 @@ def ensure_pymongo_imports():
     global MongoClient, PyMongoError
     if MongoClient is not None and PyMongoError is not Exception:
         return
+
     pymongo = importlib.import_module("pymongo")
     pymongo_errors = importlib.import_module("pymongo.errors")
     MongoClient = pymongo.MongoClient
     PyMongoError = pymongo_errors.PyMongoError
 
-
-# MongoDB
+# MongoDB ulanish
 MONGO_URL = os.environ.get("MONGO_URL", "").strip()
 client = None
 db = None
 movies_col = None
+users_col = None
 SERVICE_UNAVAILABLE_TEXT = "Serverda vaqtincha muammo bor. Keyinroq yana urinib ko'ring."
 
 
 def reset_db_connection():
-    global client, db, movies_col
+    global client, db, movies_col, users_col
     if client is not None:
         try:
             client.close()
@@ -81,17 +78,18 @@ def reset_db_connection():
     client = None
     db = None
     movies_col = None
+    users_col = None
     set_health_state(db="disconnected")
 
 
 def get_movies_col():
-    global client, db, movies_col
+    global client, db, movies_col, users_col
     if movies_col is not None:
         return movies_col
     ensure_pymongo_imports()
     if not MONGO_URL:
         set_health_state(db="error", last_error="MONGO_URL topilmadi")
-        raise RuntimeError("MONGO_URL topilmadi.")
+        raise RuntimeError("MONGO_URL topilmadi. Environment variable sifatida sozlang.")
     try:
         client = MongoClient(
             MONGO_URL,
@@ -102,6 +100,7 @@ def get_movies_col():
         client.admin.command("ping")
         db = client["moviebot"]
         movies_col = db["movies"]
+        users_col = db["users"]
         set_health_state(db="connected", last_error="")
         return movies_col
     except Exception as exc:
@@ -112,6 +111,24 @@ def get_movies_col():
 
 def run_db(operation):
     col = get_movies_col()
+    try:
+        return operation(col)
+    except PyMongoError as exc:
+        reset_db_connection()
+        set_health_state(db="error", last_error=f"MongoDB: {exc}")
+        raise
+
+
+def get_users_col():
+    global users_col
+    if users_col is not None:
+        return users_col
+    get_movies_col()
+    return users_col
+
+
+def run_users_db(operation):
+    col = get_users_col()
     try:
         return operation(col)
     except PyMongoError as exc:
@@ -146,6 +163,42 @@ def get_movie(code):
     }
 
 
+def track_user(user):
+    if user is None:
+        return
+
+    run_users_db(
+        lambda col: col.update_one(
+            {"user_id": user.id},
+            {
+                "$set": {
+                    "user_id": user.id,
+                    "username": user.username or "",
+                    "first_name": user.first_name or "",
+                    "last_name": user.last_name or "",
+                    "is_admin": user.id == ADMIN_ID,
+                    "last_seen_at": int(time.time()),
+                }
+            },
+            upsert=True,
+        )
+    )
+
+
+def get_tracked_user_count():
+    return run_users_db(lambda col: col.count_documents({"is_admin": {"$ne": True}}))
+
+
+def remember_user(update):
+    user = update.effective_user
+    if user is None:
+        return
+    try:
+        track_user(user)
+    except Exception:
+        logger.exception("Foydalanuvchini saqlashda xato yuz berdi")
+
+
 KOD, NOM, SIFAT, TIL, VAQT = range(5)
 
 
@@ -154,6 +207,7 @@ async def log_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    remember_user(update)
     await update.message.reply_text(
         "Salom! Movie HD botiga xush kelibsiz!\nKino kodini yozing."
     )
@@ -257,7 +311,7 @@ async def delete_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         exists = movie_exists(code)
     except Exception:
-        logger.exception("DB tekshiruvda xato")
+        logger.exception("Kinoni o'chirish uchun DB tekshiruvda xato yuz berdi")
         await reply_service_unavailable(update)
         return
     if not exists:
@@ -266,27 +320,46 @@ async def delete_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         delete_movie_db(code)
     except Exception:
-        logger.exception("O'chirishda xato")
+        logger.exception("Kinoni o'chirishda xato yuz berdi")
         await reply_service_unavailable(update)
         return
     await update.message.reply_text(f"{code} kodli kino o'chirildi.")
 
 
+async def show_user_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+    if not context.args or context.args[0] != "777":
+        await update.message.reply_text("Ishlatish: /foydalanuvchi 777")
+        return
+    try:
+        total_users = get_tracked_user_count()
+    except Exception:
+        logger.exception("Foydalanuvchilar sonini olishda xato yuz berdi")
+        await reply_service_unavailable(update)
+        return
+    await update.message.reply_text(f"Foydalanuvchilar soni: {total_users}")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    remember_user(update)
     text = update.message.text.strip()
     if not text.isdigit():
         await update.message.reply_text("Kino kodini yozing.")
         return
+
     code = text
     try:
         data = get_movie(code)
     except Exception:
-        logger.exception("Kinoni qidirishda xato")
+        logger.exception("Kinoni qidirishda xato yuz berdi")
         await reply_service_unavailable(update)
         return
     if not data:
         await update.message.reply_text(f"{code} kodli kino topilmadi.")
         return
+
     caption = (
         f"{data.get('nom', '-')}\n"
         f"Sifat: {data.get('sifat', '-')}\n"
@@ -304,7 +377,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def build_application():
     ensure_telegram_imports()
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN topilmadi.")
+        raise RuntimeError("BOT_TOKEN topilmadi. Environment variable sifatida sozlang.")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_error_handler(log_error)
@@ -326,6 +399,7 @@ def build_application():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("delete", delete_movie))
+    app.add_handler(CommandHandler("foydalanuvchi", show_user_count))
     app.add_handler(conv)
     app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
     app.add_handler(
@@ -335,46 +409,30 @@ def build_application():
 
 
 def run_bot_forever():
-    global _shutdown_requested
-
-    # SIGTERM kelganda o'chirmasdan restart qilish uchun ignore qilamiz
-    # Render.com deploy paytida SIGTERM yuboradi — biz uni ushlab qayta ishga tushiramiz
-    def handle_sigterm(signum, frame):
-        logger.warning("SIGTERM qabul qilindi — bot qayta ishga tushadi...")
-        # _shutdown_requested = False — bot loop davom etaveradi
-
-    signal.signal(signal.SIGTERM, handle_sigterm)
-    signal.signal(signal.SIGINT, handle_sigterm)
-
     while True:
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            asyncio.set_event_loop(asyncio.new_event_loop())
             set_health_state(bot="starting", last_error="")
             app = build_application()
             logger.info("Bot ishga tushdi...")
             set_health_state(bot="running", last_error="")
-            app.run_polling(
-                bootstrap_retries=-1,
-                drop_pending_updates=True,   # eski xabarlarni o'tkazib yuboradi
-                close_loop=False,
-            )
-            logger.warning("Polling to'xtadi. 3 soniyadan keyin qayta ishga tushadi...")
-            set_health_state(bot="restarting")
+            app.run_polling(bootstrap_retries=-1)
+            logger.warning("Polling to'xtadi. 5 soniyadan keyin qayta ishga tushadi.")
+            set_health_state(bot="stopped")
         except Exception as exc:
-            logger.exception("Bot xatosi. 3 soniyadan keyin qayta urinish...")
+            logger.exception("Bot ishida xato yuz berdi. 5 soniyadan keyin qayta urinish bo'ladi.")
             set_health_state(bot="error", last_error=str(exc))
-        finally:
-            try:
-                loop.close()
-            except Exception:
-                pass
-        time.sleep(3)
+        time.sleep(5)
 
 
 def main():
-    keep_alive()
-    set_health_state(service="running", bot="starting", db="unknown", last_error="")
+    if os.environ.get("PORT"):
+        keep_alive()
+        set_health_state(service="running", bot="starting", db="unknown", last_error="")
+    else:
+        logger.info("PORT topilmadi. Bot worker rejimida ishga tushmoqda.")
+        set_health_state(service="worker", bot="starting", db="unknown", last_error="")
+
     run_bot_forever()
 
 
