@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 _health: dict = {
     "service": "starting",
-    "bot": "starting",
+    "bot": "starting", 
     "db": "unknown",
     "last_error": "",
 }
@@ -19,26 +19,14 @@ def set_health_state(**kwargs):
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        with _lock:
-            state = dict(_health)
-
-        if self.path == "/health":
-            body = str(state).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        else:
-            body = b"OK"
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+        body = b"OK"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, format, *args):
-        # Loglarni jimib qo'yamiz (har ping logga tushmasin)
         pass
 
 
