@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 _health: dict = {
     "service": "starting",
-    "bot": "starting", 
+    "bot": "starting",
     "db": "unknown",
     "last_error": "",
 }
@@ -18,6 +18,11 @@ def set_health_state(**kwargs):
 
 
 class HealthHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+
     def do_GET(self):
         body = b"OK"
         self.send_response(200)
