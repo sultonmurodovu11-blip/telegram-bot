@@ -1,21 +1,18 @@
+from __future__ import annotations
+
+import asyncio
+import importlib
 import logging
 import os
-
-from pymongo import MongoClient
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    filters,
-)
+import signal
+import sys
+import time
+from typing import TYPE_CHECKING
 
 try:
-    from keep_alive import keep_alive
+    from keep_alive import keep_alive, set_health_state
 except ImportError:
-    from .keep_alive import keep_alive
+    from .keep_alive import keep_alive, set_health_state
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "6102256074"))
@@ -26,38 +23,117 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# MongoDB ulanish
+if TYPE_CHECKING:
+    from telegram import Update
+    from telegram.ext import ContextTypes
+
+ApplicationBuilder = None
+CommandHandler = None
+ContextTypes = None
+ConversationHandler = None
+MessageHandler = None
+filters = None
+MongoClient = None
+PyMongoError = Exception
+
+# Global flag — SIGTERM kelganda bot restart qiladi, o'chirmaydi
+_shutdown_requested = False
+
+
+def ensure_telegram_imports():
+    global ApplicationBuilder, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
+    if ApplicationBuilder is not None:
+        return
+    telegram_ext = importlib.import_module("telegram.ext")
+    ApplicationBuilder = telegram_ext.ApplicationBuilder
+    CommandHandler = telegram_ext.CommandHandler
+    ContextTypes = telegram_ext.ContextTypes
+    ConversationHandler = telegram_ext.ConversationHandler
+    MessageHandler = telegram_ext.MessageHandler
+    filters = telegram_ext.filters
+
+
+def ensure_pymongo_imports():
+    global MongoClient, PyMongoError
+    if MongoClient is not None and PyMongoError is not Exception:
+        return
+    pymongo = importlib.import_module("pymongo")
+    pymongo_errors = importlib.import_module("pymongo.errors")
+    MongoClient = pymongo.MongoClient
+    PyMongoError = pymongo_errors.PyMongoError
+
+
+# MongoDB
 MONGO_URL = os.environ.get("MONGO_URL", "").strip()
 client = None
 db = None
 movies_col = None
+SERVICE_UNAVAILABLE_TEXT = "Serverda vaqtincha muammo bor. Keyinroq yana urinib ko'ring."
 
 
-def init_db():
+def reset_db_connection():
+    global client, db, movies_col
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            pass
+    client = None
+    db = None
+    movies_col = None
+    set_health_state(db="disconnected")
+
+
+def get_movies_col():
     global client, db, movies_col
     if movies_col is not None:
-        return
+        return movies_col
+    ensure_pymongo_imports()
     if not MONGO_URL:
-        raise RuntimeError("MONGO_URL topilmadi. Environment variable sifatida sozlang.")
-    client = MongoClient(MONGO_URL)
-    db = client["moviebot"]
-    movies_col = db["movies"]
+        set_health_state(db="error", last_error="MONGO_URL topilmadi")
+        raise RuntimeError("MONGO_URL topilmadi.")
+    try:
+        client = MongoClient(
+            MONGO_URL,
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=5000,
+            socketTimeoutMS=5000,
+        )
+        client.admin.command("ping")
+        db = client["moviebot"]
+        movies_col = db["movies"]
+        set_health_state(db="connected", last_error="")
+        return movies_col
+    except Exception as exc:
+        reset_db_connection()
+        set_health_state(db="error", last_error=f"MongoDB: {exc}")
+        raise
+
+
+def run_db(operation):
+    col = get_movies_col()
+    try:
+        return operation(col)
+    except PyMongoError as exc:
+        reset_db_connection()
+        set_health_state(db="error", last_error=f"MongoDB: {exc}")
+        raise
 
 
 def save_movie(code, data):
-    movies_col.update_one({"code": code}, {"$set": {**data, "code": code}}, upsert=True)
+    run_db(lambda col: col.update_one({"code": code}, {"$set": {**data, "code": code}}, upsert=True))
 
 
 def delete_movie_db(code):
-    movies_col.delete_one({"code": code})
+    run_db(lambda col: col.delete_one({"code": code}))
 
 
 def movie_exists(code):
-    return movies_col.find_one({"code": code}) is not None
+    return run_db(lambda col: col.find_one({"code": code}) is not None)
 
 
 def get_movie(code):
-    doc = movies_col.find_one({"code": code})
+    doc = run_db(lambda col: col.find_one({"code": code}))
     if not doc:
         return None
     return {
@@ -85,6 +161,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bu komanda mavjud emas. Kino kodini yozing.")
+
+
+async def reply_service_unavailable(update: Update):
+    if update.message:
+        await update.message.reply_text(SERVICE_UNAVAILABLE_TEXT)
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -143,7 +224,12 @@ async def get_vaqt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "til": d["til"],
         "vaqt": d["vaqt"],
     }
-    save_movie(code, data)
+    try:
+        save_movie(code, data)
+    except Exception:
+        logger.exception("Kinoni saqlashda xato yuz berdi")
+        await reply_service_unavailable(update)
+        return ConversationHandler.END
     await update.message.reply_text(
         f"Saqlandi.\n\n"
         f"Kod: {code}\n"
@@ -168,10 +254,21 @@ async def delete_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Ishlatish: /delete <kod>")
         return
     code = context.args[0]
-    if not movie_exists(code):
+    try:
+        exists = movie_exists(code)
+    except Exception:
+        logger.exception("DB tekshiruvda xato")
+        await reply_service_unavailable(update)
+        return
+    if not exists:
         await update.message.reply_text(f"{code} kodli kino topilmadi.")
         return
-    delete_movie_db(code)
+    try:
+        delete_movie_db(code)
+    except Exception:
+        logger.exception("O'chirishda xato")
+        await reply_service_unavailable(update)
+        return
     await update.message.reply_text(f"{code} kodli kino o'chirildi.")
 
 
@@ -180,13 +277,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text.isdigit():
         await update.message.reply_text("Kino kodini yozing.")
         return
-
     code = text
-    data = get_movie(code)
+    try:
+        data = get_movie(code)
+    except Exception:
+        logger.exception("Kinoni qidirishda xato")
+        await reply_service_unavailable(update)
+        return
     if not data:
         await update.message.reply_text(f"{code} kodli kino topilmadi.")
         return
-
     caption = (
         f"{data.get('nom', '-')}\n"
         f"Sifat: {data.get('sifat', '-')}\n"
@@ -201,10 +301,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_document(document=file_id, caption=caption)
 
 
-def main():
+def build_application():
+    ensure_telegram_imports()
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN topilmadi. Environment variable sifatida sozlang.")
-    init_db()
+        raise RuntimeError("BOT_TOKEN topilmadi.")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_error_handler(log_error)
@@ -231,10 +331,51 @@ def main():
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.User(ADMIN_ID), handle_message)
     )
+    return app
 
+
+def run_bot_forever():
+    global _shutdown_requested
+
+    # SIGTERM kelganda o'chirmasdan restart qilish uchun ignore qilamiz
+    # Render.com deploy paytida SIGTERM yuboradi — biz uni ushlab qayta ishga tushiramiz
+    def handle_sigterm(signum, frame):
+        logger.warning("SIGTERM qabul qilindi — bot qayta ishga tushadi...")
+        # _shutdown_requested = False — bot loop davom etaveradi
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
+    signal.signal(signal.SIGINT, handle_sigterm)
+
+    while True:
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            set_health_state(bot="starting", last_error="")
+            app = build_application()
+            logger.info("Bot ishga tushdi...")
+            set_health_state(bot="running", last_error="")
+            app.run_polling(
+                bootstrap_retries=-1,
+                drop_pending_updates=True,   # eski xabarlarni o'tkazib yuboradi
+                close_loop=False,
+            )
+            logger.warning("Polling to'xtadi. 3 soniyadan keyin qayta ishga tushadi...")
+            set_health_state(bot="restarting")
+        except Exception as exc:
+            logger.exception("Bot xatosi. 3 soniyadan keyin qayta urinish...")
+            set_health_state(bot="error", last_error=str(exc))
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+        time.sleep(3)
+
+
+def main():
     keep_alive()
-    logger.info("Bot ishga tushdi...")
-    app.run_polling()
+    set_health_state(service="running", bot="starting", db="unknown", last_error="")
+    run_bot_forever()
 
 
 if __name__ == "__main__":
