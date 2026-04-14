@@ -244,7 +244,17 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def get_kod(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["kod"] = update.message.text.strip()
+    code = update.message.text.strip()
+    try:
+        exists = movie_exists(code)
+    except Exception:
+        logger.exception("Kinoni tekshirishda xato yuz berdi")
+        await reply_service_unavailable(update)
+        return ConversationHandler.END
+    if exists:
+        await update.message.reply_text("❌ Bu kodda kino bor. Boshqa kod kiriting:")
+        return KOD
+    context.user_data["kod"] = code
     await update.message.reply_text("🎬 Kino nomini kiriting:")
     return NOM
 
