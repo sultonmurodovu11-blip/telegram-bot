@@ -805,23 +805,9 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Boshqa kino faylini yuboring."
         )
         return ConversationHandler.END
-    try:
-        last_code, next_code = get_last_and_next_movie_code()
-    except Exception:
-        logger.exception("Keyingi kino kodini olishda xato yuz berdi")
-        await reply_service_unavailable(update)
-        return ConversationHandler.END
-    context.user_data["suggested_kod"] = next_code
     context.user_data.pop("vaqt_draft", None)
     context.user_data.pop("vaqt_locked", None)
-    await update.message.reply_text(
-        f"🎥 Video qabul qilindi.\n\n"
-        f"🧾 Oxirgi kino kodi: {last_code}\n"
-        f"🆔 Tavsiya etilgan yangi kod: {next_code}\n\n"
-        "📝 Kod va davomiylikni birga kiriting.\n"
-        "Misol: 125 1:57:36\n"
-        f"Agar kod o'zgarmasa, faqat davomiylik yuboring: {next_code} uchun masalan 1:57:36"
-    )
+    await update.message.reply_text("🆔 Kodini kiriting:")
     return KOD_VAQT
 
 
@@ -845,32 +831,17 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Boshqa kino faylini yuboring."
         )
         return ConversationHandler.END
-    try:
-        last_code, next_code = get_last_and_next_movie_code()
-    except Exception:
-        logger.exception("Keyingi kino kodini olishda xato yuz berdi")
-        await reply_service_unavailable(update)
-        return ConversationHandler.END
-    context.user_data["suggested_kod"] = next_code
     context.user_data.pop("vaqt_draft", None)
     context.user_data.pop("vaqt_locked", None)
-    await update.message.reply_text(
-        f"📄 Fayl qabul qilindi.\n\n"
-        f"🧾 Oxirgi kino kodi: {last_code}\n"
-        f"🆔 Tavsiya etilgan yangi kod: {next_code}\n\n"
-        "📝 Kod va davomiylikni birga kiriting.\n"
-        "Misol: 125 1:57:36\n"
-        f"Agar kod o'zgarmasa, faqat davomiylik yuboring: {next_code} uchun masalan 1:57:36"
-    )
+    await update.message.reply_text("🆔 Kodini kiriting:")
     return KOD_VAQT
 
 
 async def get_kod_vaqt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d = context.user_data
-    suggested_code = d.get("suggested_kod", "")
-    code, duration, error_text = parse_code_and_duration_input(update.message.text, suggested_code)
-    if error_text:
-        await update.message.reply_text(error_text)
+    code = update.message.text.strip()
+    if not code or not code.isdigit():
+        await update.message.reply_text("🆔 Kodini kiriting:")
         return KOD_VAQT
 
     try:
@@ -881,117 +852,36 @@ async def get_kod_vaqt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     if exists:
-        await update.message.reply_text(
-            f"⚠️ {code} kodi band.\n"
-            "Boshqa kod bilan qayta kiriting (misol: 126 1:57:36)."
-        )
+        await update.message.reply_text("🆔 Kodini kiriting:")
         return KOD_VAQT
 
     d["kod"] = code
-    d["vaqt"] = duration
-    d["vaqt_locked"] = True
     await update.message.reply_text("🎬 Kino nomini kiriting:")
     return NOM
 
 
 async def get_nom(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["nom"] = update.message.text.strip()
-    previous_sifat = context.user_data.get("last_sifat", DEFAULT_SIFAT)
-    await update.message.reply_text(
-        f"🎥 Sifatni tanlang yoki yozing.\n"
-        f"♻️ Oldingi qiymat: {previous_sifat}",
-        reply_markup=get_sifat_keyboard(),
-    )
+    await update.message.reply_text("🎥 Sifatini kiriting:", reply_markup=ReplyKeyboardRemove())
     return SIFAT
 
 
 async def get_sifat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    previous_sifat = context.user_data.get("last_sifat", DEFAULT_SIFAT)
-    context.user_data["sifat"] = resolve_input_value(update.message.text, previous_sifat, DEFAULT_SIFAT)
-    previous_til = context.user_data.get("last_til", DEFAULT_TIL)
-    await update.message.reply_text(
-        f"🌐 Tilni tanlang yoki yozing.\n"
-        f"♻️ Oldingi qiymat: {previous_til}",
-        reply_markup=get_til_keyboard(),
-    )
+    context.user_data["sifat"] = update.message.text.strip() or DEFAULT_SIFAT
+    await update.message.reply_text("🌐 Tilini kiriting:")
     return TIL
 
 
 async def get_til(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d = context.user_data
-    previous_til = d.get("last_til", DEFAULT_TIL)
-    d["til"] = resolve_input_value(update.message.text, previous_til, DEFAULT_TIL)
-    if d.get("vaqt_locked"):
-        await send_confirm_prompt(update, d)
-        return CONFIRM
-
-    previous_vaqt = d.get("last_vaqt", DEFAULT_VAQT)
-    d["vaqt_draft"] = ""
-    await update.message.reply_text(
-        get_duration_input_text(d["vaqt_draft"], previous_vaqt),
-        reply_markup=get_vaqt_keyboard(),
-    )
+    d["til"] = update.message.text.strip() or DEFAULT_TIL
+    await update.message.reply_text("⏱️ Davomiyligini kiriting:")
     return VAQT
 
 
 async def get_vaqt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d = context.user_data
-    previous_vaqt = d.get("last_vaqt", DEFAULT_VAQT)
-    value = update.message.text.strip()
-    draft_value = d.get("vaqt_draft", "")
-
-    if value == KEEP_PREVIOUS_TEXT:
-        d["vaqt"] = previous_vaqt
-    elif value == DURATION_BACKSPACE_TEXT:
-        d["vaqt_draft"] = draft_value[:-1]
-        await update.message.reply_text(
-            get_duration_input_text(d["vaqt_draft"], previous_vaqt),
-            reply_markup=get_vaqt_keyboard(),
-        )
-        return VAQT
-    elif value == DURATION_CLEAR_TEXT:
-        d["vaqt_draft"] = ""
-        await update.message.reply_text(
-            get_duration_input_text(d["vaqt_draft"], previous_vaqt),
-            reply_markup=get_vaqt_keyboard(),
-        )
-        return VAQT
-    elif value == DURATION_CONFIRM_TEXT:
-        if not draft_value:
-            await update.message.reply_text(
-                "⛔ Avval davomiylikni kiriting.",
-                reply_markup=get_vaqt_keyboard(),
-            )
-            return VAQT
-        if not is_duration_format_valid(draft_value):
-            await update.message.reply_text(
-                "⛔ Format noto'g'ri. To'g'ri misol: 1:57:36",
-                reply_markup=get_vaqt_keyboard(),
-            )
-            return VAQT
-        d["vaqt"] = draft_value
-    elif len(value) == 1 and value in DURATION_ALLOWED_CHARS:
-        updated_draft = append_duration_char(draft_value, value)
-        if updated_draft == draft_value:
-            await update.message.reply_text(
-                "⛔ Bu belgini shu joyga qo'shib bo'lmaydi.",
-                reply_markup=get_vaqt_keyboard(),
-            )
-            return VAQT
-        d["vaqt_draft"] = updated_draft
-        await update.message.reply_text(
-            get_duration_input_text(d["vaqt_draft"], previous_vaqt),
-            reply_markup=get_vaqt_keyboard(),
-        )
-        return VAQT
-    else:
-        if not is_duration_format_valid(value):
-            await update.message.reply_text(
-                "⛔ Noto'g'ri format. Masalan: 1:57:36\nYoki tugmalar bilan kiriting.",
-                reply_markup=get_vaqt_keyboard(),
-            )
-            return VAQT
-        d["vaqt"] = value
+    d["vaqt"] = update.message.text.strip() or DEFAULT_VAQT
 
     await send_confirm_prompt(update, d)
     return CONFIRM
@@ -1025,7 +915,6 @@ async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d["last_sifat"] = d["sifat"]
     d["last_til"] = d["til"]
     d["last_vaqt"] = d["vaqt"]
-    d.pop("suggested_kod", None)
     d.pop("vaqt_locked", None)
     d.pop("vaqt_draft", None)
     await update.message.reply_text(
@@ -1717,3 +1606,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
