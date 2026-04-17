@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import importlib
@@ -14,10 +14,8 @@ except ImportError:
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "6102256074"))
-INSTAGRAM_CHANNEL_URL = os.environ.get(
-    "INSTAGRAM_CHANNEL_URL",
-    "https://www.instagram.com/kinotop.bot?igsh=MTd5am0xbG40ZzZ0Zg%3D%3D&utm_source=qr",
-).strip()
+DEFAULT_INSTAGRAM_URL = "https://www.instagram.com/kinotop.bot/"
+INSTAGRAM_CHANNEL_URL = os.environ.get("INSTAGRAM_CHANNEL_URL", "").strip() or DEFAULT_INSTAGRAM_URL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,13 +35,15 @@ MessageHandler = None
 filters = None
 InlineKeyboardButton = None
 InlineKeyboardMarkup = None
+ReplyKeyboardMarkup = None
+ReplyKeyboardRemove = None
 MongoClient = None
 PyMongoError = Exception
 
 
 def ensure_telegram_imports():
     global ApplicationBuilder, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
-    global InlineKeyboardButton, InlineKeyboardMarkup
+    global InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
     if ApplicationBuilder is not None:
         return
 
@@ -51,6 +51,8 @@ def ensure_telegram_imports():
     telegram_ext = importlib.import_module("telegram.ext")
     InlineKeyboardButton = telegram.InlineKeyboardButton
     InlineKeyboardMarkup = telegram.InlineKeyboardMarkup
+    ReplyKeyboardMarkup = telegram.ReplyKeyboardMarkup
+    ReplyKeyboardRemove = telegram.ReplyKeyboardRemove
     ApplicationBuilder = telegram_ext.ApplicationBuilder
     CommandHandler = telegram_ext.CommandHandler
     ContextTypes = telegram_ext.ContextTypes
@@ -76,6 +78,12 @@ db = None
 movies_col = None
 users_col = None
 SERVICE_UNAVAILABLE_TEXT = "Serverda vaqtincha muammo bor. Keyinroq yana urinib ko'ring."
+DEFAULT_SIFAT = os.environ.get("DEFAULT_SIFAT", "720p").strip() or "720p"
+DEFAULT_TIL = os.environ.get("DEFAULT_TIL", "O'zbek").strip() or "O'zbek"
+DEFAULT_VAQT = os.environ.get("DEFAULT_VAQT", "-").strip() or "-"
+KEEP_PREVIOUS_TEXT = "♻️ Oldingisini qoldirish"
+CONFIRM_SAVE_TEXT = "✅ Saqlash"
+CONFIRM_CANCEL_TEXT = "❌ Bekor qilish"
 
 
 def reset_db_connection():
@@ -159,6 +167,37 @@ def movie_exists(code):
     return run_db(lambda col: col.find_one({"code": code}) is not None)
 
 
+def get_movie_by_file_id(file_id):
+    doc = run_db(lambda col: col.find_one({"file_id": file_id}, {"code": 1, "nom": 1, "_id": 0}))
+    if not doc:
+        return None
+    return {
+        "code": doc.get("code", "-"),
+        "nom": doc.get("nom", "-"),
+    }
+
+
+def get_next_movie_code():
+    def operation(col):
+        pipeline = [
+            {
+                "$addFields": {
+                    "code_num": {
+                        "$convert": {"input": "$code", "to": "int", "onError": None, "onNull": None}
+                    }
+                }
+            },
+            {"$match": {"code_num": {"$ne": None}}},
+            {"$sort": {"code_num": -1}},
+            {"$limit": 1},
+        ]
+        latest = next(col.aggregate(pipeline), None)
+        next_code = (latest["code_num"] + 1) if latest else 1
+        return str(next_code)
+
+    return run_db(operation)
+
+
 def get_movie(code):
     doc = run_db(lambda col: col.find_one({"code": code}))
     if not doc:
@@ -209,7 +248,46 @@ def remember_user(update):
         logger.exception("Foydalanuvchini saqlashda xato yuz berdi")
 
 
-KOD, NOM, SIFAT, TIL, VAQT = range(5)
+def get_sifat_keyboard():
+    return ReplyKeyboardMarkup(
+        [["1080p", "720p", "480p"], [KEEP_PREVIOUS_TEXT]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def get_til_keyboard():
+    return ReplyKeyboardMarkup(
+        [["O'zbek", "Rus", "Ingliz"], [KEEP_PREVIOUS_TEXT]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def get_vaqt_keyboard():
+    return ReplyKeyboardMarkup(
+        [[KEEP_PREVIOUS_TEXT]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def get_confirm_keyboard():
+    return ReplyKeyboardMarkup(
+        [[CONFIRM_SAVE_TEXT, CONFIRM_CANCEL_TEXT]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def resolve_input_value(raw_value, previous_value, fallback_value):
+    value = raw_value.strip()
+    if value == KEEP_PREVIOUS_TEXT:
+        return previous_value or fallback_value
+    return value or previous_value or fallback_value
+
+
+NOM, SIFAT, TIL, VAQT, CONFIRM = range(5)
 EDIT_KOD, EDIT_NOM, EDIT_SIFAT, EDIT_TIL, EDIT_VAQT = range(5, 10)
 
 
@@ -239,8 +317,31 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data["file_id"] = update.message.video.file_id
     context.user_data["file_type"] = "video"
-    await update.message.reply_text("🎥 Video qabul qilindi.\n\n🆔 Kino raqamini kiriting:")
-    return KOD
+    try:
+        existing_movie = get_movie_by_file_id(context.user_data["file_id"])
+    except Exception:
+        logger.exception("Dublikat videoni tekshirishda xato yuz berdi")
+        await reply_service_unavailable(update)
+        return ConversationHandler.END
+    if existing_movie:
+        await update.message.reply_text(
+            f"⚠️ Bu fayl allaqachon bazada bor.\n"
+            f"🆔 Kod: {existing_movie['code']}\n"
+            f"🎬 Nom: {existing_movie['nom']}\n\n"
+            f"Boshqa kino faylini yuboring."
+        )
+        return ConversationHandler.END
+    try:
+        next_code = get_next_movie_code()
+    except Exception:
+        logger.exception("Keyingi kino kodini olishda xato yuz berdi")
+        await reply_service_unavailable(update)
+        return ConversationHandler.END
+    context.user_data["kod"] = next_code
+    await update.message.reply_text(
+        f"🎥 Video qabul qilindi.\n\n🆔 Kod avtomatik biriktirildi: {next_code}\n🎬 Kino nomini kiriting:"
+    )
+    return NOM
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -249,37 +350,95 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data["file_id"] = update.message.document.file_id
     context.user_data["file_type"] = "document"
-    await update.message.reply_text("📄 Fayl qabul qilindi.\n\n🆔 Kino raqamini kiriting:")
-    return KOD
-
-
-async def get_kod(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["kod"] = update.message.text.strip()
-    await update.message.reply_text("🎬 Kino nomini kiriting:")
+    try:
+        existing_movie = get_movie_by_file_id(context.user_data["file_id"])
+    except Exception:
+        logger.exception("Dublikat faylni tekshirishda xato yuz berdi")
+        await reply_service_unavailable(update)
+        return ConversationHandler.END
+    if existing_movie:
+        await update.message.reply_text(
+            f"⚠️ Bu fayl allaqachon bazada bor.\n"
+            f"🆔 Kod: {existing_movie['code']}\n"
+            f"🎬 Nom: {existing_movie['nom']}\n\n"
+            f"Boshqa kino faylini yuboring."
+        )
+        return ConversationHandler.END
+    try:
+        next_code = get_next_movie_code()
+    except Exception:
+        logger.exception("Keyingi kino kodini olishda xato yuz berdi")
+        await reply_service_unavailable(update)
+        return ConversationHandler.END
+    context.user_data["kod"] = next_code
+    await update.message.reply_text(
+        f"📄 Fayl qabul qilindi.\n\n🆔 Kod avtomatik biriktirildi: {next_code}\n🎬 Kino nomini kiriting:"
+    )
     return NOM
 
 
 async def get_nom(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["nom"] = update.message.text.strip()
-    await update.message.reply_text("🎥 Sifatini kiriting (masalan: 1080p, 720p):")
+    previous_sifat = context.user_data.get("last_sifat", DEFAULT_SIFAT)
+    await update.message.reply_text(
+        f"🎥 Sifatni tanlang yoki yozing.\n"
+        f"♻️ Oldingi qiymat: {previous_sifat}",
+        reply_markup=get_sifat_keyboard(),
+    )
     return SIFAT
 
 
 async def get_sifat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["sifat"] = update.message.text.strip()
-    await update.message.reply_text("🌐 Tilini kiriting (masalan: O'zbek, Rus):")
+    previous_sifat = context.user_data.get("last_sifat", DEFAULT_SIFAT)
+    context.user_data["sifat"] = resolve_input_value(update.message.text, previous_sifat, DEFAULT_SIFAT)
+    previous_til = context.user_data.get("last_til", DEFAULT_TIL)
+    await update.message.reply_text(
+        f"🌐 Tilni tanlang yoki yozing.\n"
+        f"♻️ Oldingi qiymat: {previous_til}",
+        reply_markup=get_til_keyboard(),
+    )
     return TIL
 
 
 async def get_til(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["til"] = update.message.text.strip()
-    await update.message.reply_text("⏱️ Davomiyligini kiriting (masalan: 1:57:36):")
+    previous_til = context.user_data.get("last_til", DEFAULT_TIL)
+    context.user_data["til"] = resolve_input_value(update.message.text, previous_til, DEFAULT_TIL)
+    previous_vaqt = context.user_data.get("last_vaqt", DEFAULT_VAQT)
+    await update.message.reply_text(
+        f"⏱️ Davomiylikni kiriting (masalan: 1:57:36).\n"
+        f"♻️ Oldingi qiymat: {previous_vaqt}",
+        reply_markup=get_vaqt_keyboard(),
+    )
     return VAQT
 
 
 async def get_vaqt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d = context.user_data
-    d["vaqt"] = update.message.text.strip()
+    previous_vaqt = d.get("last_vaqt", DEFAULT_VAQT)
+    d["vaqt"] = resolve_input_value(update.message.text, previous_vaqt, DEFAULT_VAQT)
+    await update.message.reply_text(
+        f"📋 Tekshirib chiqing:\n\n"
+        f"🆔 Kod: {d['kod']}\n"
+        f"🎬 Nom: {d['nom']}\n"
+        f"🎥 Sifat: {d['sifat']}\n"
+        f"🌐 Til: {d['til']}\n"
+        f"⏱️ Davomiylik: {d['vaqt']}\n\n"
+        f"Saqlaymizmi?",
+        reply_markup=get_confirm_keyboard(),
+    )
+    return CONFIRM
+
+
+async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    choice = update.message.text.strip()
+    if choice == CONFIRM_CANCEL_TEXT:
+        await update.message.reply_text("❌ Bekor qilindi.", reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
+    if choice != CONFIRM_SAVE_TEXT:
+        await update.message.reply_text("Iltimos, tugmadan birini tanlang: ✅ Saqlash yoki ❌ Bekor qilish.")
+        return CONFIRM
+
+    d = context.user_data
     code = d["kod"]
     data = {
         "type": d["file_type"],
@@ -295,19 +454,24 @@ async def get_vaqt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Kinoni saqlashda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
+    d["last_sifat"] = d["sifat"]
+    d["last_til"] = d["til"]
+    d["last_vaqt"] = d["vaqt"]
     await update.message.reply_text(
         f"✅ Saqlandi.\n\n"
         f"🆔 Kod: {code}\n"
         f"🎬 Nom: {d['nom']}\n"
         f"🎥 Sifat: {d['sifat']}\n"
         f"🌐 Til: {d['til']}\n"
-        f"⏱️ Davomiylik: {d['vaqt']}"
+        f"⏱️ Davomiylik: {d['vaqt']}\n\n"
+        f"Keyingi kino uchun yana video yoki fayl yuboring.",
+        reply_markup=ReplyKeyboardRemove(),
     )
     return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Bekor qilindi.")
+    await update.message.reply_text("❌ Bekor qilindi.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 
@@ -478,6 +642,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_document(document=file_id, caption=caption, reply_markup=reply_markup)
 
+    # Ba'zi Telegram klientlarida media xabaridagi tugma chiqmasligi mumkin.
+    # Shu sabab tugmani alohida xabarda ham yuboramiz.
+    if reply_markup is not None:
+        await update.message.reply_text(
+            "Qolgan kino kodlari uchun quyidagi tugmani bosing:",
+            reply_markup=reply_markup,
+        )
+
 
 def build_application():
     ensure_telegram_imports()
@@ -493,11 +665,11 @@ def build_application():
             MessageHandler(filters.Document.ALL & filters.User(ADMIN_ID), handle_document),
         ],
         states={
-            KOD: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_kod)],
             NOM: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_nom)],
             SIFAT: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_sifat)],
             TIL: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_til)],
             VAQT: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_vaqt)],
+            CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), confirm_save)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
