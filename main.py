@@ -14,6 +14,10 @@ except ImportError:
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "6102256074"))
+INSTAGRAM_CHANNEL_URL = os.environ.get(
+    "INSTAGRAM_CHANNEL_URL",
+    "https://www.instagram.com/kinotop.bot?igsh=MTd5am0xbG40ZzZ0Zg%3D%3D&utm_source=qr",
+).strip()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,16 +35,22 @@ ContextTypes = None
 ConversationHandler = None
 MessageHandler = None
 filters = None
+InlineKeyboardButton = None
+InlineKeyboardMarkup = None
 MongoClient = None
 PyMongoError = Exception
 
 
 def ensure_telegram_imports():
     global ApplicationBuilder, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
+    global InlineKeyboardButton, InlineKeyboardMarkup
     if ApplicationBuilder is not None:
         return
 
+    telegram = importlib.import_module("telegram")
     telegram_ext = importlib.import_module("telegram.ext")
+    InlineKeyboardButton = telegram.InlineKeyboardButton
+    InlineKeyboardMarkup = telegram.InlineKeyboardMarkup
     ApplicationBuilder = telegram_ext.ApplicationBuilder
     CommandHandler = telegram_ext.CommandHandler
     ContextTypes = telegram_ext.ContextTypes
@@ -244,17 +254,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def get_kod(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    code = update.message.text.strip()
-    try:
-        exists = movie_exists(code)
-    except Exception:
-        logger.exception("Kinoni tekshirishda xato yuz berdi")
-        await reply_service_unavailable(update)
-        return ConversationHandler.END
-    if exists:
-        await update.message.reply_text("❌ Bu kodda kino bor. Boshqa kod kiriting:")
-        return KOD
-    context.user_data["kod"] = code
+    context.user_data["kod"] = update.message.text.strip()
     await update.message.reply_text("🎬 Kino nomini kiriting:")
     return NOM
 
@@ -467,11 +467,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏱️ Davomiylik: {data.get('vaqt', '-')}\n"
         f"🆔 Kod: {code}"
     )
+    reply_markup = None
+    if INSTAGRAM_CHANNEL_URL:
+        reply_markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Qolgan kino kodlarini ko'rish uchun bosing", url=INSTAGRAM_CHANNEL_URL)]]
+        )
     file_id = data["file_id"]
     if data["type"] == "video":
-        await update.message.reply_video(video=file_id, caption=caption)
+        await update.message.reply_video(video=file_id, caption=caption, reply_markup=reply_markup)
     else:
-        await update.message.reply_document(document=file_id, caption=caption)
+        await update.message.reply_document(document=file_id, caption=caption, reply_markup=reply_markup)
 
 
 def build_application():
