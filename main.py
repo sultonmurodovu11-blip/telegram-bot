@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import logging
 import os
+import re
 import time
 from typing import TYPE_CHECKING
 
@@ -93,6 +94,8 @@ FOLDER_SKIP_TEXT = "❌ Yo'q, oddiy saqlash"
 FOLDER_CREATE_TEXT = "🆕 Yangi jild yaratish"
 FOLDER_ADD_EXISTING_TEXT = "📂 Mavjud jildga qo'shish"
 FOLDER_BACK_TEXT = "🔙 Orqaga"
+JILD_FINISH_TEXT = "✅ Tugatish"
+JILD_CLEAR_TEXT = "🧹 Tozalash"
 DURATION_CONFIRM_TEXT = "✅ Vaqtni tasdiqlash"
 DURATION_BACKSPACE_TEXT = "⌫ O'chirish"
 DURATION_CLEAR_TEXT = "🧹 Tozalash"
@@ -374,17 +377,60 @@ def get_folder_by_code(code):
     return run_folders_db(lambda col: col.find_one({"codes": code}, {"_id": 0, "name": 1, "codes": 1}))
 
 
+def get_folder_by_name(name):
+    value = name.strip()
+    if not value:
+        return None
+    folder = run_folders_db(
+        lambda col: col.find_one({"name_lower": value.lower()}, {"_id": 0, "name": 1, "codes": 1})
+    )
+    if folder is not None:
+        return folder
+    folder = run_folders_db(lambda col: col.find_one({"name": value}, {"_id": 0, "name": 1, "codes": 1}))
+    if folder is not None:
+        return folder
+    pattern = f"^{re.escape(value)}$"
+    return run_folders_db(
+        lambda col: col.find_one({"name": {"$regex": pattern, "$options": "i"}}, {"_id": 0, "name": 1, "codes": 1})
+    )
+
+
 def add_movie_to_folder(folder_name, code):
     run_folders_db(
         lambda col: col.update_one(
             {"name": folder_name},
             {
-                "$set": {"name": folder_name},
+                "$set": {"name": folder_name, "name_lower": folder_name.lower()},
                 "$addToSet": {"codes": code},
                 "$setOnInsert": {"created_at": int(time.time())},
             },
             upsert=True,
         )
+    )
+
+
+def add_movies_to_folder(folder_name, codes):
+    unique_codes = sort_codes_for_folder(list(set(codes)))
+    if not unique_codes:
+        return
+    run_folders_db(
+        lambda col: col.update_one(
+            {"name": folder_name},
+            {
+                "$set": {"name": folder_name, "name_lower": folder_name.lower()},
+                "$addToSet": {"codes": {"$each": unique_codes}},
+                "$setOnInsert": {"created_at": int(time.time())},
+            },
+            upsert=True,
+        )
+    )
+
+
+def get_existing_movie_codes(codes):
+    if not codes:
+        return []
+    return run_db(
+        lambda col: [item["code"] for item in col.find({"code": {"$in": codes}}, {"_id": 0, "code": 1})]
     )
 
 
@@ -606,6 +652,55 @@ def build_folder_list_keyboard(folder_names):
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=True)
 
 
+def get_jild_codes_keyboard():
+    return ReplyKeyboardMarkup(
+        [[JILD_FINISH_TEXT, JILD_CLEAR_TEXT]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def parse_codes_input(raw_value):
+    normalized = (
+        raw_value.replace(",", " ")
+        .replace(";", " ")
+        .replace("\n", " ")
+        .strip()
+    )
+    if not normalized:
+        return [], ["bo'sh qiymat"]
+
+    parsed_codes = set()
+    invalid_tokens = []
+    for token in normalized.split():
+        value = token.strip()
+        if not value:
+            continue
+        if "-" in value:
+            parts = value.split("-", 1)
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                start_num = int(parts[0])
+                end_num = int(parts[1])
+                if start_num <= end_num:
+                    for code_num in range(start_num, end_num + 1):
+                        parsed_codes.add(str(code_num))
+                    continue
+        elif value.isdigit():
+            parsed_codes.add(value)
+            continue
+        invalid_tokens.append(value)
+    return sort_codes_for_folder(list(parsed_codes)), invalid_tokens
+
+
+def format_codes_for_text(codes, limit=20):
+    if not codes:
+        return "-"
+    if len(codes) <= limit:
+        return ", ".join(codes)
+    preview = ", ".join(codes[:limit])
+    return f"{preview} ... (jami {len(codes)} ta)"
+
+
 def resolve_input_value(raw_value, previous_value, fallback_value):
     value = raw_value.strip()
     if value == KEEP_PREVIOUS_TEXT:
@@ -649,8 +744,42 @@ def get_duration_input_text(draft_value, previous_value):
     )
 
 
-NOM, SIFAT, TIL, VAQT, CONFIRM, FOLDER_CHOICE, FOLDER_CREATE, FOLDER_PICK = range(8)
-EDIT_KOD, EDIT_NOM, EDIT_SIFAT, EDIT_TIL, EDIT_VAQT = range(8, 13)
+def parse_code_and_duration_input(raw_value, default_code):
+    value = raw_value.strip()
+    if not value:
+        return None, None, "⛔ Kod va davomiylikni kiriting. Misol: 125 1:57:36"
+
+    parts = value.split()
+    if len(parts) == 1:
+        code = default_code
+        duration = parts[0]
+    else:
+        code = parts[0]
+        duration = " ".join(parts[1:]).strip()
+
+    if not code or not code.isdigit():
+        return None, None, "⛔ Kod faqat raqamlardan iborat bo'lsin. Misol: 125 1:57:36"
+    if not duration or not is_duration_format_valid(duration):
+        return None, None, "⛔ Davomiylik formati noto'g'ri. To'g'ri misol: 1:57:36"
+    return code, duration, None
+
+
+async def send_confirm_prompt(update: Update, data):
+    await update.message.reply_text(
+        f"📋 Tekshirib chiqing:\n\n"
+        f"🆔 Kod: {data['kod']}\n"
+        f"🎬 Nom: {data['nom']}\n"
+        f"🎥 Sifat: {data['sifat']}\n"
+        f"🌐 Til: {data['til']}\n"
+        f"⏱️ Davomiylik: {data['vaqt']}\n\n"
+        f"Saqlaymizmi?",
+        reply_markup=get_confirm_keyboard(),
+    )
+
+
+KOD_VAQT, NOM, SIFAT, TIL, VAQT, CONFIRM, FOLDER_CHOICE, FOLDER_CREATE, FOLDER_PICK = range(9)
+EDIT_KOD, EDIT_NOM, EDIT_SIFAT, EDIT_TIL, EDIT_VAQT = range(9, 14)
+JILD_CODES, JILD_NAME = range(14, 16)
 
 
 async def log_error(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -660,12 +789,12 @@ async def log_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remember_user(update)
     await update.message.reply_text(
-        "🎬 Salom! Movie HD botiga xush kelibsiz!\nKino kodini yozing."
+        "🎬 Salom! Movie HD botiga xush kelibsiz!\nKino kodi yoki jild nomini yozing."
     )
 
 
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❓ Bu komanda mavjud emas. 🎬 Kino kodini yozing.")
+    await update.message.reply_text("❓ Bu komanda mavjud emas. 🎬 Kino kodi yoki jild nomini yozing.")
 
 
 async def reply_service_unavailable(update: Update):
@@ -701,14 +830,18 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Keyingi kino kodini olishda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
-    context.user_data["kod"] = next_code
+    context.user_data["suggested_kod"] = next_code
+    context.user_data.pop("vaqt_draft", None)
+    context.user_data.pop("vaqt_locked", None)
     await update.message.reply_text(
         f"🎥 Video qabul qilindi.\n\n"
         f"🧾 Oxirgi kino kodi: {last_code}\n"
-        f"🆔 Yangi kod avtomatik biriktirildi: {next_code}\n"
-        f"🎬 Kino nomini kiriting:"
+        f"🆔 Tavsiya etilgan yangi kod: {next_code}\n\n"
+        "📝 Kod va davomiylikni birga kiriting.\n"
+        "Misol: 125 1:57:36\n"
+        f"Agar kod o'zgarmasa, faqat davomiylik yuboring: {next_code} uchun masalan 1:57:36"
     )
-    return NOM
+    return KOD_VAQT
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -737,13 +870,46 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Keyingi kino kodini olishda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
-    context.user_data["kod"] = next_code
+    context.user_data["suggested_kod"] = next_code
+    context.user_data.pop("vaqt_draft", None)
+    context.user_data.pop("vaqt_locked", None)
     await update.message.reply_text(
         f"📄 Fayl qabul qilindi.\n\n"
         f"🧾 Oxirgi kino kodi: {last_code}\n"
-        f"🆔 Yangi kod avtomatik biriktirildi: {next_code}\n"
-        f"🎬 Kino nomini kiriting:"
+        f"🆔 Tavsiya etilgan yangi kod: {next_code}\n\n"
+        "📝 Kod va davomiylikni birga kiriting.\n"
+        "Misol: 125 1:57:36\n"
+        f"Agar kod o'zgarmasa, faqat davomiylik yuboring: {next_code} uchun masalan 1:57:36"
     )
+    return KOD_VAQT
+
+
+async def get_kod_vaqt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    d = context.user_data
+    suggested_code = d.get("suggested_kod", "")
+    code, duration, error_text = parse_code_and_duration_input(update.message.text, suggested_code)
+    if error_text:
+        await update.message.reply_text(error_text)
+        return KOD_VAQT
+
+    try:
+        exists = movie_exists(code)
+    except Exception:
+        logger.exception("Kino kodini tekshirishda xato yuz berdi")
+        await reply_service_unavailable(update)
+        return ConversationHandler.END
+
+    if exists:
+        await update.message.reply_text(
+            f"⚠️ {code} kodi band.\n"
+            "Boshqa kod bilan qayta kiriting (misol: 126 1:57:36)."
+        )
+        return KOD_VAQT
+
+    d["kod"] = code
+    d["vaqt"] = duration
+    d["vaqt_locked"] = True
+    await update.message.reply_text("🎬 Kino nomini kiriting:")
     return NOM
 
 
@@ -771,12 +937,17 @@ async def get_sifat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def get_til(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    previous_til = context.user_data.get("last_til", DEFAULT_TIL)
-    context.user_data["til"] = resolve_input_value(update.message.text, previous_til, DEFAULT_TIL)
-    previous_vaqt = context.user_data.get("last_vaqt", DEFAULT_VAQT)
-    context.user_data["vaqt_draft"] = ""
+    d = context.user_data
+    previous_til = d.get("last_til", DEFAULT_TIL)
+    d["til"] = resolve_input_value(update.message.text, previous_til, DEFAULT_TIL)
+    if d.get("vaqt_locked"):
+        await send_confirm_prompt(update, d)
+        return CONFIRM
+
+    previous_vaqt = d.get("last_vaqt", DEFAULT_VAQT)
+    d["vaqt_draft"] = ""
     await update.message.reply_text(
-        get_duration_input_text(context.user_data["vaqt_draft"], previous_vaqt),
+        get_duration_input_text(d["vaqt_draft"], previous_vaqt),
         reply_markup=get_vaqt_keyboard(),
     )
     return VAQT
@@ -841,16 +1012,7 @@ async def get_vaqt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return VAQT
         d["vaqt"] = value
 
-    await update.message.reply_text(
-        f"📋 Tekshirib chiqing:\n\n"
-        f"🆔 Kod: {d['kod']}\n"
-        f"🎬 Nom: {d['nom']}\n"
-        f"🎥 Sifat: {d['sifat']}\n"
-        f"🌐 Til: {d['til']}\n"
-        f"⏱️ Davomiylik: {d['vaqt']}\n\n"
-        f"Saqlaymizmi?",
-        reply_markup=get_confirm_keyboard(),
-    )
+    await send_confirm_prompt(update, d)
     return CONFIRM
 
 
@@ -882,6 +1044,9 @@ async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d["last_sifat"] = d["sifat"]
     d["last_til"] = d["til"]
     d["last_vaqt"] = d["vaqt"]
+    d.pop("suggested_kod", None)
+    d.pop("vaqt_locked", None)
+    d.pop("vaqt_draft", None)
     await update.message.reply_text(
         "📁 Jildga saqlashni xohlaysizmi?",
         reply_markup=get_folder_choice_keyboard(),
@@ -1014,7 +1179,131 @@ async def handle_folder_pick(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return await save_to_folder_and_finish(update, context, value)
 
 
+async def jild_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    remember_user(update)
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        return ConversationHandler.END
+
+    context.user_data["jild_codes"] = []
+    await update.message.reply_text(
+        "📁 Jild yaratish boshlandi.\n"
+        "Kino kodlarini yuboring (masalan: 9 yoki 9 10 11 yoki 9-16).\n"
+        f"Tayyor bo'lganda {JILD_FINISH_TEXT} tugmasini bosing.",
+        reply_markup=get_jild_codes_keyboard(),
+    )
+    return JILD_CODES
+
+
+async def jild_get_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    value = update.message.text.strip()
+    d = context.user_data
+    current_codes = set(d.get("jild_codes", []))
+
+    if value == JILD_CLEAR_TEXT:
+        d["jild_codes"] = []
+        await update.message.reply_text(
+            "🧹 Kodlar ro'yxati tozalandi. Yangi kodlarni yuboring.",
+            reply_markup=get_jild_codes_keyboard(),
+        )
+        return JILD_CODES
+
+    if value == JILD_FINISH_TEXT:
+        if not current_codes:
+            await update.message.reply_text(
+                "⛔ Hali birorta kod kiritilmadi. Avval kod yuboring.",
+                reply_markup=get_jild_codes_keyboard(),
+            )
+            return JILD_CODES
+        d["jild_codes"] = sort_codes_for_folder(list(current_codes))
+        await update.message.reply_text(
+            "📝 Endi jild nomini yozing:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return JILD_NAME
+
+    parsed_codes, invalid_tokens = parse_codes_input(value)
+    if not parsed_codes and invalid_tokens:
+        await update.message.reply_text(
+            f"⛔ Noto'g'ri qiymat(lar): {', '.join(invalid_tokens)}\n"
+            "To'g'ri misol: 9 yoki 9 10 11 yoki 9-16",
+            reply_markup=get_jild_codes_keyboard(),
+        )
+        return JILD_CODES
+    if not parsed_codes:
+        await update.message.reply_text(
+            "⛔ Kodlarni kiriting.",
+            reply_markup=get_jild_codes_keyboard(),
+        )
+        return JILD_CODES
+
+    try:
+        existing_codes = set(get_existing_movie_codes(parsed_codes))
+    except Exception:
+        logger.exception("Jild uchun kodlarni tekshirishda xato yuz berdi")
+        await reply_service_unavailable(update)
+        return ConversationHandler.END
+
+    missing_codes = [code for code in parsed_codes if code not in existing_codes]
+    new_codes = [code for code in parsed_codes if code in existing_codes and code not in current_codes]
+    current_codes.update(existing_codes)
+    d["jild_codes"] = sort_codes_for_folder(list(current_codes))
+
+    message_lines = [
+        f"✅ Qo'shildi: {len(new_codes)} ta",
+        f"📚 Jami yig'ilgan kodlar: {len(d['jild_codes'])} ta",
+        f"🧾 Ro'yxat: {format_codes_for_text(d['jild_codes'])}",
+    ]
+    if missing_codes:
+        message_lines.append(f"⚠️ Topilmagan kodlar: {', '.join(missing_codes)}")
+    if invalid_tokens:
+        message_lines.append(f"⚠️ Noto'g'ri qiymat(lar): {', '.join(invalid_tokens)}")
+    message_lines.append(f"Tayyor bo'lsa {JILD_FINISH_TEXT} tugmasini bosing.")
+    await update.message.reply_text(
+        "\n".join(message_lines),
+        reply_markup=get_jild_codes_keyboard(),
+    )
+    return JILD_CODES
+
+
+async def jild_get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    folder_name = update.message.text.strip()
+    if not folder_name:
+        await update.message.reply_text("⛔ Jild nomi bo'sh bo'lmasin. Qayta yozing:")
+        return JILD_NAME
+
+    d = context.user_data
+    codes = d.get("jild_codes", [])
+    if not codes:
+        await update.message.reply_text(
+            "⛔ Kodlar topilmadi. /jild buyrug'ini qayta ishga tushiring.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ConversationHandler.END
+
+    try:
+        existed_before = folder_exists_by_name(folder_name)
+        add_movies_to_folder(folder_name, codes)
+        folder_movies = get_movies_for_folder(folder_name)
+    except Exception:
+        logger.exception("Jildni saqlashda xato yuz berdi")
+        await reply_service_unavailable(update)
+        return ConversationHandler.END
+
+    d.pop("jild_codes", None)
+    action_text = "yangilandi" if existed_before else "yaratildi"
+    await update.message.reply_text(
+        f"✅ Jild {action_text}.\n"
+        f"📂 Nomi: {folder_name}\n"
+        f"📚 Jilddagi kinolar: {len(folder_movies)} ta\n"
+        f"🧾 Kodlar: {format_codes_for_text([movie['code'] for movie in folder_movies])}",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return ConversationHandler.END
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("jild_codes", None)
     await update.message.reply_text("❌ Bekor qilindi.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
@@ -1299,7 +1588,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remember_user(update)
     text = update.message.text.strip()
     if not text.isdigit():
-        await update.message.reply_text("🎬 Kino kodini yozing.")
+        try:
+            folder_data = get_folder_by_name(text)
+        except Exception:
+            logger.exception("Jild nomi bo'yicha qidirishda xato yuz berdi")
+            await reply_service_unavailable(update)
+            return
+        if folder_data is not None:
+            try:
+                folder_movies = get_movies_for_folder(folder_data["name"])
+            except Exception:
+                logger.exception("Jilddagi kinolarni olishda xato yuz berdi")
+                await reply_service_unavailable(update)
+                return
+            if folder_movies:
+                await send_folder_parts_prompt(update.message, folder_data, folder_movies)
+                return
+        await update.message.reply_text("🎬 Kino kodini yoki jild nomini yozing.")
         return
 
     code = text
@@ -1368,6 +1673,7 @@ def build_application():
             MessageHandler(filters.Document.ALL & filters.User(ADMIN_ID), handle_document),
         ],
         states={
+            KOD_VAQT: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_kod_vaqt)],
             NOM: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_nom)],
             SIFAT: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_sifat)],
             TIL: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_til)],
@@ -1392,6 +1698,15 @@ def build_application():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
+    jild_conv = ConversationHandler(
+        entry_points=[CommandHandler("jild", jild_start)],
+        states={
+            JILD_CODES: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), jild_get_codes)],
+            JILD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), jild_get_name)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("delete", delete_movie))
     app.add_handler(CommandHandler("foydalanuvchi", show_user_count))
@@ -1400,6 +1715,7 @@ def build_application():
     app.add_handler(CommandHandler("seriallist", list_series_ranges))
     app.add_handler(conv)
     app.add_handler(edit_conv)
+    app.add_handler(jild_conv)
     app.add_handler(CallbackQueryHandler(handle_series_part_callback, pattern=f"^{SERIES_CALLBACK_PREFIX}"))
     app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
