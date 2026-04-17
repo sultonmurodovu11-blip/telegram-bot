@@ -4,7 +4,6 @@ import asyncio
 import importlib
 import logging
 import os
-import re
 import time
 from typing import TYPE_CHECKING
 
@@ -375,24 +374,6 @@ def folder_exists_by_name(name):
 
 def get_folder_by_code(code):
     return run_folders_db(lambda col: col.find_one({"codes": code}, {"_id": 0, "name": 1, "codes": 1}))
-
-
-def get_folder_by_name(name):
-    value = name.strip()
-    if not value:
-        return None
-    folder = run_folders_db(
-        lambda col: col.find_one({"name_lower": value.lower()}, {"_id": 0, "name": 1, "codes": 1})
-    )
-    if folder is not None:
-        return folder
-    folder = run_folders_db(lambda col: col.find_one({"name": value}, {"_id": 0, "name": 1, "codes": 1}))
-    if folder is not None:
-        return folder
-    pattern = f"^{re.escape(value)}$"
-    return run_folders_db(
-        lambda col: col.find_one({"name": {"$regex": pattern, "$options": "i"}}, {"_id": 0, "name": 1, "codes": 1})
-    )
 
 
 def add_movie_to_folder(folder_name, code):
@@ -789,12 +770,12 @@ async def log_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remember_user(update)
     await update.message.reply_text(
-        "🎬 Salom! Movie HD botiga xush kelibsiz!\nKino kodi yoki jild nomini yozing."
+        "🎬 Salom! Movie HD botiga xush kelibsiz!\nKino kodini yozing."
     )
 
 
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❓ Bu komanda mavjud emas. 🎬 Kino kodi yoki jild nomini yozing.")
+    await update.message.reply_text("❓ Bu komanda mavjud emas. 🎬 Kino kodini yozing.")
 
 
 async def reply_service_unavailable(update: Update):
@@ -1588,23 +1569,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remember_user(update)
     text = update.message.text.strip()
     if not text.isdigit():
-        try:
-            folder_data = get_folder_by_name(text)
-        except Exception:
-            logger.exception("Jild nomi bo'yicha qidirishda xato yuz berdi")
-            await reply_service_unavailable(update)
-            return
-        if folder_data is not None:
-            try:
-                folder_movies = get_movies_for_folder(folder_data["name"])
-            except Exception:
-                logger.exception("Jilddagi kinolarni olishda xato yuz berdi")
-                await reply_service_unavailable(update)
-                return
-            if folder_movies:
-                await send_folder_parts_prompt(update.message, folder_data, folder_movies)
-                return
-        await update.message.reply_text("🎬 Kino kodini yoki jild nomini yozing.")
+        await update.message.reply_text("🎬 Kino kodini yozing.")
         return
 
     code = text
