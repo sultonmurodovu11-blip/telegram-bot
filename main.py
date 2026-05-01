@@ -51,6 +51,7 @@ def ensure_telegram_imports():
     global InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
     if ApplicationBuilder is not None:
         return
+
     telegram = importlib.import_module("telegram")
     telegram_ext = importlib.import_module("telegram.ext")
     InlineKeyboardButton = telegram.InlineKeyboardButton
@@ -70,6 +71,7 @@ def ensure_pymongo_imports():
     global MongoClient, PyMongoError
     if MongoClient is not None and PyMongoError is not Exception:
         return
+
     pymongo = importlib.import_module("pymongo")
     pymongo_errors = importlib.import_module("pymongo.errors")
     MongoClient = pymongo.MongoClient
@@ -96,6 +98,11 @@ FOLDER_ADD_EXISTING_TEXT = "📂 Mavjud jildga qo'shish"
 FOLDER_BACK_TEXT = "🔙 Orqaga"
 JILD_FINISH_TEXT = "✅ Tugatish"
 JILD_CLEAR_TEXT = "🧹 Tozalash"
+DURATION_CONFIRM_TEXT = "✅ Vaqtni tasdiqlash"
+DURATION_BACKSPACE_TEXT = "⌫ O'chirish"
+DURATION_CLEAR_TEXT = "🧹 Tozalash"
+DURATION_ALLOWED_CHARS = set("0123456789:")
+DURATION_MAX_LENGTH = 10
 SERIES_CALLBACK_PREFIX = "series_part:"
 
 _broadcast_active = False
@@ -124,7 +131,7 @@ def get_movies_col():
     ensure_pymongo_imports()
     if not MONGO_URL:
         set_health_state(db="error", last_error="MONGO_URL topilmadi")
-        raise RuntimeError("MONGO_URL topilmadi.")
+        raise RuntimeError("MONGO_URL topilmadi. Environment variable sifatida sozlang.")
     try:
         client = MongoClient(
             MONGO_URL,
@@ -226,13 +233,22 @@ def get_movie_by_file_id(file_id):
     doc = run_db(lambda col: col.find_one({"file_id": file_id}, {"code": 1, "nom": 1, "_id": 0}))
     if not doc:
         return None
-    return {"code": doc.get("code", "-"), "nom": doc.get("nom", "-")}
+    return {
+        "code": doc.get("code", "-"),
+        "nom": doc.get("nom", "-"),
+    }
 
 
 def get_last_and_next_movie_code():
     def operation(col):
         pipeline = [
-            {"$addFields": {"code_num": {"$convert": {"input": "$code", "to": "int", "onError": None, "onNull": None}}}},
+            {
+                "$addFields": {
+                    "code_num": {
+                        "$convert": {"input": "$code", "to": "int", "onError": None, "onNull": None}
+                    }
+                }
+            },
             {"$match": {"code_num": {"$ne": None}}},
             {"$sort": {"code_num": -1}},
             {"$limit": 1},
@@ -242,6 +258,7 @@ def get_last_and_next_movie_code():
             last_code_num = int(latest["code_num"])
             return str(last_code_num), str(last_code_num + 1)
         return "yo'q", "1"
+
     return run_db(operation)
 
 
@@ -265,36 +282,21 @@ def parse_numeric_code(value):
     return int(value)
 
 
-def save_series_range(start_code_num, end_code_num, title):
-    run_series_db(
-        lambda col: col.update_one(
-            {"start_code_num": start_code_num, "end_code_num": end_code_num},
-            {"$set": {"start_code_num": start_code_num, "end_code_num": end_code_num, "title": title}},
-            upsert=True,
-        )
-    )
-
-
 def get_series_range_by_code(code):
     code_num = parse_numeric_code(code)
     if code_num is None:
         return None
+
     def operation(col):
         cursor = col.find(
-            {"start_code_num": {"$lte": code_num}, "end_code_num": {"$gte": code_num}},
+            {
+                "start_code_num": {"$lte": code_num},
+                "end_code_num": {"$gte": code_num},
+            },
             {"_id": 0},
         ).sort("start_code_num", 1).limit(1)
         return next(cursor, None)
-    return run_series_db(operation)
 
-
-def get_overlapping_series_ranges(start_code_num, end_code_num):
-    def operation(col):
-        cursor = col.find(
-            {"start_code_num": {"$lte": end_code_num}, "end_code_num": {"$gte": start_code_num}},
-            {"_id": 0},
-        ).sort("start_code_num", 1)
-        return list(cursor)
     return run_series_db(operation)
 
 
@@ -305,12 +307,27 @@ def get_all_series_ranges():
 def get_movies_in_range(start_code_num, end_code_num):
     def operation(col):
         pipeline = [
-            {"$addFields": {"code_num": {"$convert": {"input": "$code", "to": "int", "onError": None, "onNull": None}}}},
-            {"$match": {"code_num": {"$ne": None, "$gte": start_code_num, "$lte": end_code_num}}},
+            {
+                "$addFields": {
+                    "code_num": {
+                        "$convert": {"input": "$code", "to": "int", "onError": None, "onNull": None}
+                    }
+                }
+            },
+            {
+                "$match": {
+                    "code_num": {
+                        "$ne": None,
+                        "$gte": start_code_num,
+                        "$lte": end_code_num,
+                    }
+                }
+            },
             {"$sort": {"code_num": 1}},
             {"$project": {"_id": 0, "code": 1, "nom": 1, "code_num": 1}},
         ]
         return list(col.aggregate(pipeline))
+
     return run_db(operation)
 
 
@@ -360,7 +377,9 @@ def add_movies_to_folder(folder_name, codes):
 def get_existing_movie_codes(codes):
     if not codes:
         return []
-    return run_db(lambda col: [item["code"] for item in col.find({"code": {"$in": codes}}, {"_id": 0, "code": 1})])
+    return run_db(
+        lambda col: [item["code"] for item in col.find({"code": {"$in": codes}}, {"_id": 0, "code": 1})]
+    )
 
 
 def sort_codes_for_folder(codes):
@@ -403,11 +422,22 @@ def get_all_user_ids():
 # ===================== SEVIMLILAR =====================
 
 def add_to_favorites(user_id, code):
-    run_users_db(lambda col: col.update_one({"user_id": user_id}, {"$addToSet": {"favorites": code}}, upsert=True))
+    run_users_db(
+        lambda col: col.update_one(
+            {"user_id": user_id},
+            {"$addToSet": {"favorites": code}},
+            upsert=True,
+        )
+    )
 
 
 def remove_from_favorites(user_id, code):
-    run_users_db(lambda col: col.update_one({"user_id": user_id}, {"$pull": {"favorites": code}}))
+    run_users_db(
+        lambda col: col.update_one(
+            {"user_id": user_id},
+            {"$pull": {"favorites": code}},
+        )
+    )
 
 
 def get_favorites(user_id):
@@ -422,7 +452,9 @@ def get_favorites(user_id):
 
 def is_favorite(user_id, code):
     try:
-        doc = run_users_db(lambda col: col.find_one({"user_id": user_id, "favorites": code}, {"_id": 1}))
+        doc = run_users_db(lambda col: col.find_one(
+            {"user_id": user_id, "favorites": code}, {"_id": 1}
+        ))
         return doc is not None
     except Exception:
         return False
@@ -451,11 +483,12 @@ def get_user_started_at(user_id):
 
 
 def get_verification_keyboard():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Botga o'tish", url=VERIFICATION_BOT_URL)]])
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("✅ Botga o'tish", url=VERIFICATION_BOT_URL)]]
+    )
 
 
-# ======================================================
-
+# ===================== MOVIE HELPERS =====================
 
 def get_movie_reply_markup(code, user_id=None):
     rows = []
@@ -489,7 +522,12 @@ def get_series_parts_keyboard(series_data, movies):
     start_code_num = series_data["start_code_num"]
     for movie in movies:
         part_number = (movie["code_num"] - start_code_num) + 1
-        row.append(InlineKeyboardButton(f"{part_number}-qism", callback_data=f"{SERIES_CALLBACK_PREFIX}{movie['code']}"))
+        row.append(
+            InlineKeyboardButton(
+                f"{part_number}-qism",
+                callback_data=f"{SERIES_CALLBACK_PREFIX}{movie['code']}",
+            )
+        )
         if len(row) == 3:
             rows.append(row)
             row = []
@@ -502,7 +540,12 @@ def get_folder_parts_keyboard(movies):
     rows = []
     row = []
     for index, movie in enumerate(movies, start=1):
-        row.append(InlineKeyboardButton(f"{index}-qism", callback_data=f"{SERIES_CALLBACK_PREFIX}{movie['code']}"))
+        row.append(
+            InlineKeyboardButton(
+                f"{index}-qism",
+                callback_data=f"{SERIES_CALLBACK_PREFIX}{movie['code']}",
+            )
+        )
         if len(row) == 3:
             rows.append(row)
             row = []
@@ -571,36 +614,50 @@ def remember_user(update):
     try:
         track_user(user)
     except Exception:
-        logger.exception("Foydalanuvchini saqlashda xato")
+        logger.exception("Foydalanuvchini saqlashda xato yuz berdi")
 
 
 # ===================== TUGMALAR =====================
 
 def get_sifat_keyboard():
     return ReplyKeyboardMarkup(
-        [["480p", "720p", "1080p"], ["1080p Full HD"], [KEEP_PREVIOUS_TEXT]],
-        resize_keyboard=True, one_time_keyboard=True,
+        [
+            ["480p", "720p", "1080p"],
+            ["1080p Full HD"],
+            [KEEP_PREVIOUS_TEXT],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
     )
 
 
 def get_til_keyboard():
     return ReplyKeyboardMarkup(
-        [["🇺🇿 O'zbek", "🇷🇺 Rus", "🇬🇧 Ingliz"], [KEEP_PREVIOUS_TEXT]],
-        resize_keyboard=True, one_time_keyboard=True,
+        [
+            ["🇺🇿 O'zbek", "🇷🇺 Rus", "🇬🇧 Ingliz"],
+            [KEEP_PREVIOUS_TEXT],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
     )
 
 
 def get_confirm_keyboard():
     return ReplyKeyboardMarkup(
         [[CONFIRM_SAVE_TEXT, CONFIRM_CANCEL_TEXT]],
-        resize_keyboard=True, one_time_keyboard=True,
+        resize_keyboard=True,
+        one_time_keyboard=True,
     )
 
 
 def get_folder_choice_keyboard():
     return ReplyKeyboardMarkup(
-        [[FOLDER_SKIP_TEXT], [FOLDER_CREATE_TEXT, FOLDER_ADD_EXISTING_TEXT]],
-        resize_keyboard=True, one_time_keyboard=True,
+        [
+            [FOLDER_SKIP_TEXT],
+            [FOLDER_CREATE_TEXT, FOLDER_ADD_EXISTING_TEXT],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
     )
 
 
@@ -621,43 +678,52 @@ def build_folder_list_keyboard(folder_names):
 def get_jild_codes_keyboard():
     return ReplyKeyboardMarkup(
         [[JILD_FINISH_TEXT, JILD_CLEAR_TEXT]],
-        resize_keyboard=True, one_time_keyboard=False,
+        resize_keyboard=True,
+        one_time_keyboard=False,
     )
 
 
 def get_kod_suggestion_keyboard(next_code):
     return ReplyKeyboardMarkup(
         [[next_code, KEEP_PREVIOUS_TEXT]],
-        resize_keyboard=True, one_time_keyboard=True,
+        resize_keyboard=True,
+        one_time_keyboard=True,
     )
 
 
 def get_admin_menu_keyboard():
+    """Admin uchun asosiy menyu tugmalari — emoji yo'q."""
     return ReplyKeyboardMarkup(
         [
-            ["➕ Kino qo'shish (video/fayl yuboring)", "✏️ /edit"],
-            ["🗑️ /delete <kod>", "📁 /jild"],
-            ["🎞️ /serialadd", "📋 /seriallist"],
-            ["👥 /foydalanuvchi 777", "📢 /adminlik"],
-            ["🏆 /top", "❓ /help"],
+            ["/edit", "/delete <kod>"],
+            ["/jild", "/seriallist"],
+            ["/foydalanuvchi 777", "/adminlik"],
+            ["/stat", "/top"],
+            ["/sevimli", "/help"],
         ],
-        resize_keyboard=True, one_time_keyboard=False,
+        resize_keyboard=True,
+        one_time_keyboard=False,
     )
 
 
-def format_codes_for_text(codes, limit=20):
-    if not codes:
-        return "-"
-    if len(codes) <= limit:
-        return ", ".join(codes)
-    preview = ", ".join(codes[:limit])
-    return f"{preview} ... (jami {len(codes)} ta)"
+def get_broadcast_stop_keyboard():
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Xabar yuborishni to'xtatish", callback_data="stop_broadcast")]]
+    )
 
+
+# ====================================================
 
 def parse_codes_input(raw_value):
-    normalized = raw_value.replace(",", " ").replace(";", " ").replace("\n", " ").strip()
+    normalized = (
+        raw_value.replace(",", " ")
+        .replace(";", " ")
+        .replace("\n", " ")
+        .strip()
+    )
     if not normalized:
         return [], ["bo'sh qiymat"]
+
     parsed_codes = set()
     invalid_tokens = []
     for token in normalized.split():
@@ -680,6 +746,15 @@ def parse_codes_input(raw_value):
     return sort_codes_for_folder(list(parsed_codes)), invalid_tokens
 
 
+def format_codes_for_text(codes, limit=20):
+    if not codes:
+        return "-"
+    if len(codes) <= limit:
+        return ", ".join(codes)
+    preview = ", ".join(codes[:limit])
+    return f"{preview} ... (jami {len(codes)} ta)"
+
+
 async def send_confirm_prompt(update, data):
     await update.message.reply_text(
         f"📋 Tekshirib chiqing:\n\n"
@@ -693,6 +768,15 @@ async def send_confirm_prompt(update, data):
     )
 
 
+KOD_VAQT, NOM, SIFAT, TIL, VAQT, CONFIRM, FOLDER_CHOICE, FOLDER_CREATE, FOLDER_PICK = range(9)
+EDIT_KOD, EDIT_NOM, EDIT_SIFAT, EDIT_TIL, EDIT_VAQT = range(9, 14)
+JILD_CODES, JILD_NAME = range(14, 16)
+
+
+async def log_error(update: object, context):
+    logger.exception("Telegram handler error", exc_info=context.error)
+
+
 async def reply_service_unavailable(update):
     if update.message:
         await update.message.reply_text(SERVICE_UNAVAILABLE_TEXT)
@@ -700,19 +784,7 @@ async def reply_service_unavailable(update):
         await update.callback_query.message.reply_text(SERVICE_UNAVAILABLE_TEXT)
 
 
-# ===================== CONVERSATION STATES =====================
-KOD_VAQT, NOM, SIFAT, TIL, VAQT, CONFIRM, FOLDER_CHOICE, FOLDER_CREATE, FOLDER_PICK = range(9)
-EDIT_KOD, EDIT_NOM, EDIT_SIFAT, EDIT_TIL, EDIT_VAQT = range(9, 14)
-JILD_CODES, JILD_NAME = range(14, 16)
-BROADCAST_STATE = 16
-# ==============================================================
-
-
-async def log_error(update: object, context):
-    logger.exception("Telegram handler error", exc_info=context.error)
-
-
-# ==================== /start ====================
+# ===================== START =====================
 
 async def start(update, context):
     remember_user(update)
@@ -720,7 +792,8 @@ async def start(update, context):
 
     if user_id == ADMIN_ID:
         await update.message.reply_text(
-            "🎬 Salom Admin! Movie HD botiga xush kelibsiz!",
+            "Salom Admin! Movie HD botiga xush kelibsiz!\n\n"
+            "Kino qo'shish uchun video yoki fayl yuboring.",
             reply_markup=get_admin_menu_keyboard(),
         )
         return
@@ -742,101 +815,71 @@ async def start(update, context):
     )
 
 
-# ==================== /help ====================
-
-async def user_help(update, context):
-    remember_user(update)
-    user_id = update.message.from_user.id
-
-    # Admin uchun admin yordami
-    if user_id == ADMIN_ID:
-        await update.message.reply_text(
-            "🛠️ Admin buyruqlari:\n\n"
-            "📹 Kino qo'shish: Video yoki fayl yuboring\n"
-            "✏️ /edit — Kino ma'lumotlarini tahrirlash\n"
-            "🗑️ /delete <kod> — Kinoni o'chirish\n"
-            "📁 /jild — Jild yaratish\n"
-            "🎞️ /serialadd <bosh> <oxir> <nom> — Serial qo'shish\n"
-            "📋 /seriallist — Serial ro'yxati\n"
-            "👥 /foydalanuvchi 777 — Foydalanuvchilar soni\n"
-            "📢 /adminlik — Barcha foydalanuvchilarga xabar yuborish\n"
-            "🏆 /top — Eng ko'p ko'rilgan kinolar",
-            reply_markup=get_admin_menu_keyboard(),
-        )
-        return
-
-    # Foydalanuvchi uchun yordam
-    markup = None
-    if INSTAGRAM_CHANNEL_URL:
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📸 Instagram — kino kodlari", url=INSTAGRAM_CHANNEL_URL)]
-        ])
-
-    await update.message.reply_text(
-        "🎬 Movie HD botiga xush kelibsiz!\n\n"
-        "📌 Botdan qanday foydalanish:\n\n"
-        "1️⃣ Kino kodini yozing (masalan: 125)\n"
-        "   Bot sizga kinoni yuboradi.\n\n"
-        "2️⃣ Serial yoki ko'p qismli kinolar:\n"
-        "   Kod yozganingizda qismlar ro'yxati chiqadi,\n"
-        "   kerakli qismni tugmadan tanlaysiz.\n\n"
-        "3️⃣ Sevimlilar:\n"
-        "   Kino ostidagi 🤍 tugmani bosing —\n"
-        "   kino sevimlilaringizga qo'shiladi.\n"
-        "   /sevimli buyrug'i bilan ro'yxatni ko'ring.\n\n"
-        "4️⃣ Kino kodlarini Instagram sahifamizdan toping:\n"
-        "   Quyidagi tugmani bosing 👇\n\n"
-        "❓ Muammo bo'lsa — kino kodini to'g'ri yozganingizni tekshiring.",
-        reply_markup=markup,
-    )
+async def unknown_command(update, context):
+    await update.message.reply_text("❓ Bu komanda mavjud emas. Kino kodini yozing.")
 
 
-# ==================== /adminlik — bir marta xabar yuborish ====================
+# ===================== BROADCAST =====================
 
 async def admin_broadcast_start(update, context):
-    """
-    /adminlik bosilganda admin xabar yozishni kutadi.
-    Keyingi yuborilgan bitta xabar (har qanday turdagi) barcha foydalanuvchilarga
-    yuboriladi va broadcast rejimi avtomatik to'xtaydi.
-    """
     global _broadcast_active
     remember_user(update)
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
-        return ConversationHandler.END
+        return
 
     _broadcast_active = True
     await update.message.reply_text(
-        "📢 Ommaviy xabar rejimi yoqildi!\n\n"
-        "Xabaringizni yuboring (matn, rasm, video, ovoz, hujjat, stiker).\n"
-        "Xabar yuborilgandan so'ng avtomatik to'xtaydi.",
-        reply_markup=ReplyKeyboardRemove(),
+        "Ommaviy xabar rejimi yoqildi!\n\n"
+        "Endi yuborgan har qanday narsa (matn, rasm, video, ovoz, hujjat, stiker) "
+        "barcha foydalanuvchilarga yuboriladi.\n\n"
+        "Xabarni yuboring — yuborilgandan so'ng rejim avtomatik o'chadi.",
     )
-    return BROADCAST_STATE
 
 
-async def admin_broadcast_send(update, context):
-    """
-    Admin yuborgan birinchi xabarni barcha foydalanuvchilarga jo'natadi,
-    so'ng AVTOMATIK to'xtaydi — boshqa xabar kutilmaydi.
-    """
+async def admin_broadcast_stop(update, context):
+    global _broadcast_active
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+    _broadcast_active = False
+    await update.message.reply_text(
+        "Ommaviy xabar rejimi to'xtatildi.",
+        reply_markup=get_admin_menu_keyboard(),
+    )
+
+
+async def admin_broadcast_stop_callback(update, context):
+    global _broadcast_active
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    if update.effective_user.id != ADMIN_ID:
+        return
+    _broadcast_active = False
+    await query.message.reply_text(
+        "Ommaviy xabar rejimi to'xtatildi.",
+        reply_markup=get_admin_menu_keyboard(),
+    )
+
+
+async def handle_admin_broadcast_message(update, context):
+    """Broadcast rejimida admin xabarini barcha foydalanuvchilarga yuboradi."""
     global _broadcast_active
     if not _broadcast_active:
-        return ConversationHandler.END
+        return
 
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
-        return ConversationHandler.END
-
-    # Darhol rejimni o'chirish — faqat 1 ta xabar
-    _broadcast_active = False
+        return
 
     try:
         user_ids = get_all_user_ids()
     except Exception:
         logger.exception("Foydalanuvchilar ro'yxatini olishda xato")
         await reply_service_unavailable(update)
-        return ConversationHandler.END
+        return
 
     sent = 0
     failed = 0
@@ -849,82 +892,176 @@ async def admin_broadcast_send(update, context):
             logger.warning(f"Xabar yuborishda xato (user_id={uid}): {e}")
             failed += 1
 
+    # Yuborilgandan keyin avtomatik o'chirish
+    _broadcast_active = False
+
     await update.message.reply_text(
-        f"✅ Xabar yuborildi va to'xtatildi!\n"
-        f"📤 Muvaffaqiyatli: {sent} ta\n"
-        f"❌ Xato: {failed} ta",
+        f"✅ Xabar yuborildi!\n"
+        f"Muvaffaqiyatli: {sent} ta\n"
+        f"Xato: {failed} ta\n\n"
+        f"Qayta yuborish uchun /adminlik ni bosing.",
         reply_markup=get_admin_menu_keyboard(),
     )
-    return ConversationHandler.END
 
 
-# ==================== KINO QO'SHISH ====================
+# ===================== ADMIN HELP & STAT =====================
 
-async def handle_video(update, context):
+async def admin_help(update, context):
+    remember_user(update)
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
         return
+
+    help_text = (
+        "Admin buyruqlari:\n\n"
+        "Kino qo'shish:\n"
+        "  Video yoki fayl yuboring — kod, nom, sifat, til, vaqt so'raladi\n\n"
+        "Tahrirlash:\n"
+        "  /edit — kino ma'lumotlarini yangilash\n\n"
+        "O'chirish:\n"
+        "  /delete <kod> — kinoni bazadan o'chirish\n\n"
+        "Jildlar:\n"
+        "  /jild — yangi jild yaratish\n\n"
+        "Seriallar:\n"
+        "  /seriallist — barcha serial diapazonlarini ko'rish\n\n"
+        "Statistika:\n"
+        "  /foydalanuvchi 777 — foydalanuvchilar soni\n"
+        "  /stat — bot statistikasi\n"
+        "  /top — eng ko'p ko'rilgan 20 ta kino\n"
+        "  /top 50 — eng ko'p ko'rilgan 50 ta (max 200)\n\n"
+        "Ommaviy xabar:\n"
+        "  /adminlik — barcha foydalanuvchilarga xabar yuborish\n"
+        "  /adminlikni_toxtatish — yuborishni bekor qilish\n\n"
+        "Sevimlilar:\n"
+        "  /sevimli — o'z sevimlilar ro'yxatini ko'rish\n\n"
+        "Lifehacklar:\n"
+        "  Kino yuklayotganda kod avtomatik tavsiya qilinadi\n"
+        "  Til va sifat tugmalar bilan tanlanadi\n"
+        "  Oldingi qiymatni saqlash uchun ♻️ tugmani bosing"
+    )
+
+    await update.message.reply_text(help_text, reply_markup=get_admin_menu_keyboard())
+
+
+async def admin_stat(update, context):
+    remember_user(update)
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+
+    try:
+        total_users = get_tracked_user_count()
+        total_movies = run_db(lambda col: col.count_documents({}))
+        total_folders = run_folders_db(lambda col: col.count_documents({}))
+        total_series = run_series_db(lambda col: col.count_documents({}))
+        last_code, next_code = get_last_and_next_movie_code()
+    except Exception:
+        logger.exception("Statistikani olishda xato")
+        await reply_service_unavailable(update)
+        return
+
+    await update.message.reply_text(
+        f"Bot statistikasi:\n\n"
+        f"Foydalanuvchilar: {total_users} ta\n"
+        f"Kinolar: {total_movies} ta\n"
+        f"Jildlar: {total_folders} ta\n"
+        f"Serial diapazonlari: {total_series} ta\n"
+        f"Oxirgi kino kodi: {last_code}\n"
+        f"Keyingi tavsiya kod: {next_code}"
+    )
+
+
+# ===================== VIDEO / DOCUMENT QABUL QILISH =====================
+
+async def handle_video(update, context):
+    global _broadcast_active
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+
+    # Broadcast rejimida bo'lsa — broadcast handler ishlasin
+    if _broadcast_active:
+        await handle_admin_broadcast_message(update, context)
+        return
+
     context.user_data["file_id"] = update.message.video.file_id
     context.user_data["file_type"] = "video"
     try:
         existing_movie = get_movie_by_file_id(context.user_data["file_id"])
     except Exception:
-        logger.exception("Dublikat videoni tekshirishda xato")
+        logger.exception("Dublikat videoni tekshirishda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
     if existing_movie:
         await update.message.reply_text(
             f"⚠️ Bu fayl allaqachon bazada bor.\n"
-            f"🆔 Kod: {existing_movie['code']}\n"
-            f"🎬 Nom: {existing_movie['nom']}\n\n"
+            f"Kod: {existing_movie['code']}\n"
+            f"Nom: {existing_movie['nom']}\n\n"
             f"Boshqa kino faylini yuboring."
         )
         return ConversationHandler.END
+    context.user_data.pop("vaqt_draft", None)
+    context.user_data.pop("vaqt_locked", None)
+
     try:
         last_code, next_code = get_last_and_next_movie_code()
     except Exception:
         last_code, next_code = "?", "?"
+
     await update.message.reply_text(
-        f"📌 Oxirgi saqlangan kod: {last_code}\n"
-        f"💡 Tavsiya etilayotgan kod: {next_code}\n\n"
-        f"🆔 Kodini kiriting yoki quyidagi tugmani bosing:",
+        f"Oxirgi saqlangan kod: {last_code}\n"
+        f"Tavsiya etilayotgan kod: {next_code}\n\n"
+        f"Kodini kiriting yoki quyidagi tugmani bosing:",
         reply_markup=get_kod_suggestion_keyboard(next_code),
     )
     return KOD_VAQT
 
 
 async def handle_document(update, context):
+    global _broadcast_active
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
         return
+
+    # Broadcast rejimida bo'lsa — broadcast handler ishlasin
+    if _broadcast_active:
+        await handle_admin_broadcast_message(update, context)
+        return
+
     context.user_data["file_id"] = update.message.document.file_id
     context.user_data["file_type"] = "document"
     try:
         existing_movie = get_movie_by_file_id(context.user_data["file_id"])
     except Exception:
-        logger.exception("Dublikat faylni tekshirishda xato")
+        logger.exception("Dublikat faylni tekshirishda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
     if existing_movie:
         await update.message.reply_text(
             f"⚠️ Bu fayl allaqachon bazada bor.\n"
-            f"🆔 Kod: {existing_movie['code']}\n"
-            f"🎬 Nom: {existing_movie['nom']}\n\n"
+            f"Kod: {existing_movie['code']}\n"
+            f"Nom: {existing_movie['nom']}\n\n"
             f"Boshqa kino faylini yuboring."
         )
         return ConversationHandler.END
+    context.user_data.pop("vaqt_draft", None)
+    context.user_data.pop("vaqt_locked", None)
+
     try:
         last_code, next_code = get_last_and_next_movie_code()
     except Exception:
         last_code, next_code = "?", "?"
+
     await update.message.reply_text(
-        f"📌 Oxirgi saqlangan kod: {last_code}\n"
-        f"💡 Tavsiya etilayotgan kod: {next_code}\n\n"
-        f"🆔 Kodini kiriting yoki quyidagi tugmani bosing:",
+        f"Oxirgi saqlangan kod: {last_code}\n"
+        f"Tavsiya etilayotgan kod: {next_code}\n\n"
+        f"Kodini kiriting yoki quyidagi tugmani bosing:",
         reply_markup=get_kod_suggestion_keyboard(next_code),
     )
     return KOD_VAQT
 
+
+# ===================== CONVERSATION STATES =====================
 
 async def get_kod_vaqt(update, context):
     d = context.user_data
@@ -936,7 +1073,7 @@ async def get_kod_vaqt(update, context):
         except Exception:
             next_code = "?"
         await update.message.reply_text(
-            "🆔 Kodini kiriting:",
+            "Kodini kiriting yoki tavsiyani tanlang:",
             reply_markup=get_kod_suggestion_keyboard(next_code),
         )
         return KOD_VAQT
@@ -948,7 +1085,8 @@ async def get_kod_vaqt(update, context):
         except Exception:
             next_code = "?"
         await update.message.reply_text(
-            f"⛔ Kod faqat raqamlardan iborat bo'lsin.\n💡 Tavsiya: {next_code}",
+            f"Kod faqat raqamlardan iborat bo'lsin.\n"
+            f"Tavsiya: {next_code}",
             reply_markup=get_kod_suggestion_keyboard(next_code),
         )
         return KOD_VAQT
@@ -956,7 +1094,7 @@ async def get_kod_vaqt(update, context):
     try:
         exists = movie_exists(code)
     except Exception:
-        logger.exception("Kino kodini tekshirishda xato")
+        logger.exception("Kino kodini tekshirishda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
 
@@ -966,19 +1104,26 @@ async def get_kod_vaqt(update, context):
         except Exception:
             next_code = "?"
         await update.message.reply_text(
-            f"⚠️ {code} kodi allaqachon mavjud! Boshqa kod kiriting.\n💡 Tavsiya: {next_code}",
+            f"⚠️ {code} kodi allaqachon mavjud! Boshqa kod kiriting.\n"
+            f"Tavsiya: {next_code}",
             reply_markup=get_kod_suggestion_keyboard(next_code),
         )
         return KOD_VAQT
 
     d["kod"] = code
-    await update.message.reply_text("🎬 Kino nomini kiriting:", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(
+        "Kino nomini kiriting:",
+        reply_markup=ReplyKeyboardRemove(),
+    )
     return NOM
 
 
 async def get_nom(update, context):
     context.user_data["nom"] = update.message.text.strip()
-    await update.message.reply_text("🎥 Sifatini tanlang yoki qo'lda yozing:", reply_markup=get_sifat_keyboard())
+    await update.message.reply_text(
+        "Sifatini tanlang yoki qo'lda yozing:",
+        reply_markup=get_sifat_keyboard(),
+    )
     return SIFAT
 
 
@@ -988,7 +1133,11 @@ async def get_sifat(update, context):
         context.user_data["sifat"] = context.user_data.get("last_sifat") or DEFAULT_SIFAT
     else:
         context.user_data["sifat"] = raw or DEFAULT_SIFAT
-    await update.message.reply_text("🌐 Tilini tanlang yoki qo'lda yozing:", reply_markup=get_til_keyboard())
+
+    await update.message.reply_text(
+        "Tilini tanlang yoki qo'lda yozing:",
+        reply_markup=get_til_keyboard(),
+    )
     return TIL
 
 
@@ -1004,7 +1153,11 @@ async def get_til(update, context):
                 value = value[len(prefix):]
                 break
         d["til"] = value or DEFAULT_TIL
-    await update.message.reply_text("⏱️ Davomiyligini kiriting:", reply_markup=ReplyKeyboardRemove())
+
+    await update.message.reply_text(
+        "Davomiyligini kiriting (masalan: 1:57:36 yoki shunchaki tire - ):",
+        reply_markup=ReplyKeyboardRemove(),
+    )
     return VAQT
 
 
@@ -1021,7 +1174,7 @@ async def confirm_save(update, context):
         await update.message.reply_text("❌ Bekor qilindi.", reply_markup=ReplyKeyboardRemove())
         return ConversationHandler.END
     if choice != CONFIRM_SAVE_TEXT:
-        await update.message.reply_text("Iltimos, tugmadan birini tanlang.")
+        await update.message.reply_text("Iltimos, tugmadan birini tanlang: ✅ Saqlash yoki ❌ Bekor qilish.")
         return CONFIRM
 
     d = context.user_data
@@ -1037,13 +1190,14 @@ async def confirm_save(update, context):
     try:
         save_movie(code, data)
     except Exception:
-        logger.exception("Kinoni saqlashda xato")
+        logger.exception("Kinoni saqlashda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
-
     d["last_sifat"] = d["sifat"]
     d["last_til"] = d["til"]
-
+    d["last_vaqt"] = d["vaqt"]
+    d.pop("vaqt_locked", None)
+    d.pop("vaqt_draft", None)
     await update.message.reply_text(
         "📁 Jildga saqlashni xohlaysizmi?",
         reply_markup=get_folder_choice_keyboard(),
@@ -1056,11 +1210,11 @@ async def finish_movie_save(update, context, folder_note=None):
     note_text = f"\n{folder_note}\n" if folder_note else "\n"
     await update.message.reply_text(
         f"✅ Saqlandi.\n\n"
-        f"🆔 Kod: {d['kod']}\n"
-        f"🎬 Nom: {d['nom']}\n"
-        f"🎥 Sifat: {d['sifat']}\n"
-        f"🌐 Til: {d['til']}\n"
-        f"⏱️ Davomiylik: {d['vaqt']}\n"
+        f"Kod: {d['kod']}\n"
+        f"Nom: {d['nom']}\n"
+        f"Sifat: {d['sifat']}\n"
+        f"Til: {d['til']}\n"
+        f"Davomiylik: {d['vaqt']}\n"
         f"{note_text}"
         f"Keyingi kino uchun yana video yoki fayl yuboring.",
         reply_markup=ReplyKeyboardRemove(),
@@ -1082,14 +1236,15 @@ async def save_to_folder_and_finish(update, context, folder_name):
         add_movie_to_folder(folder_name, code)
         movies = get_movies_for_folder(folder_name)
     except Exception:
-        logger.exception("Jildga kinoni saqlashda xato")
+        logger.exception("Jildga kinoni saqlashda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
+
     part_number = get_part_number_in_movies(movies, code)
     if part_number is None:
-        folder_note = f"📂 Jild: {folder_name}"
+        folder_note = f"Jild: {folder_name}"
     else:
-        folder_note = f"📂 Jild: {folder_name}\n🔢 Qism: {part_number}/{len(movies)}"
+        folder_note = f"Jild: {folder_name}\nQism: {part_number}/{len(movies)}"
     return await finish_movie_save(update, context, folder_note=folder_note)
 
 
@@ -1097,41 +1252,55 @@ async def handle_folder_choice(update, context):
     choice = update.message.text.strip()
     if choice == FOLDER_SKIP_TEXT:
         return await finish_movie_save(update, context)
+
     if choice == FOLDER_CREATE_TEXT:
-        await update.message.reply_text("🆕 Yangi jild nomini yozing:", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(
+            "Yangi jild nomini yozing:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
         return FOLDER_CREATE
+
     if choice == FOLDER_ADD_EXISTING_TEXT:
         try:
             folder_names = get_all_folder_names()
         except Exception:
-            logger.exception("Jildlar ro'yxatini olishda xato")
+            logger.exception("Jildlar ro'yxatini olishda xato yuz berdi")
             await reply_service_unavailable(update)
             return ConversationHandler.END
         if not folder_names:
             await update.message.reply_text(
-                "📭 Hali jildlar yo'q. Yangi jild yarating yoki oddiy saqlang.",
+                "Hali jildlar yo'q. Avval yangi jild yarating yoki oddiy saqlang.",
                 reply_markup=get_folder_choice_keyboard(),
             )
             return FOLDER_CHOICE
-        await update.message.reply_text("📂 Jildni tanlang:", reply_markup=build_folder_list_keyboard(folder_names))
+        await update.message.reply_text(
+            "Jildni tanlang:",
+            reply_markup=build_folder_list_keyboard(folder_names),
+        )
         return FOLDER_PICK
-    await update.message.reply_text("Iltimos, tugmalardan birini tanlang.", reply_markup=get_folder_choice_keyboard())
+
+    await update.message.reply_text(
+        "Iltimos, tugmalardan birini tanlang.",
+        reply_markup=get_folder_choice_keyboard(),
+    )
     return FOLDER_CHOICE
 
 
 async def handle_folder_create(update, context):
     folder_name = update.message.text.strip()
     if not folder_name:
-        await update.message.reply_text("⛔ Jild nomi bo'sh bo'lmasin. Qayta kiriting:")
+        await update.message.reply_text("Jild nomi bo'sh bo'lmasin. Qayta kiriting:")
         return FOLDER_CREATE
     try:
         exists = folder_exists_by_name(folder_name)
     except Exception:
-        logger.exception("Jild nomini tekshirishda xato")
+        logger.exception("Jild nomini tekshirishda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
     if exists:
-        await update.message.reply_text("⚠️ Bu nomli jild bor. Boshqa nom kiriting:")
+        await update.message.reply_text(
+            "⚠️ Bu nomli jild bor. Boshqa nom kiriting yoki mavjud jildga qo'shishdan foydalaning:"
+        )
         return FOLDER_CREATE
     return await save_to_folder_and_finish(update, context, folder_name)
 
@@ -1139,32 +1308,39 @@ async def handle_folder_create(update, context):
 async def handle_folder_pick(update, context):
     value = update.message.text.strip()
     if value == FOLDER_BACK_TEXT:
-        await update.message.reply_text("📁 Jildga saqlashni xohlaysizmi?", reply_markup=get_folder_choice_keyboard())
+        await update.message.reply_text(
+            "Jildga saqlashni xohlaysizmi?",
+            reply_markup=get_folder_choice_keyboard(),
+        )
         return FOLDER_CHOICE
     if value == FOLDER_SKIP_TEXT:
         return await finish_movie_save(update, context)
     try:
         folder_names = get_all_folder_names()
     except Exception:
-        logger.exception("Jildlar ro'yxatini tekshirishda xato")
+        logger.exception("Jildlar ro'yxatini tekshirishda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
     if value not in folder_names:
-        await update.message.reply_text("⛔ Ro'yxatdan jild tanlang.", reply_markup=build_folder_list_keyboard(folder_names))
+        await update.message.reply_text(
+            "Ro'yxatdan jild tanlang.",
+            reply_markup=build_folder_list_keyboard(folder_names),
+        )
         return FOLDER_PICK
     return await save_to_folder_and_finish(update, context, value)
 
 
-# ==================== /jild ====================
+# ===================== JILD =====================
 
 async def jild_start(update, context):
     remember_user(update)
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
         return ConversationHandler.END
+
     context.user_data["jild_codes"] = []
     await update.message.reply_text(
-        "📁 Jild yaratish boshlandi.\n"
+        "Jild yaratish boshlandi.\n"
         "Kino kodlarini yuboring (masalan: 9 yoki 9 10 11 yoki 9-16).\n"
         f"Tayyor bo'lganda {JILD_FINISH_TEXT} tugmasini bosing.",
         reply_markup=get_jild_codes_keyboard(),
@@ -1179,32 +1355,45 @@ async def jild_get_codes(update, context):
 
     if value == JILD_CLEAR_TEXT:
         d["jild_codes"] = []
-        await update.message.reply_text("🧹 Kodlar ro'yxati tozalandi.", reply_markup=get_jild_codes_keyboard())
+        await update.message.reply_text(
+            "Kodlar ro'yxati tozalandi. Yangi kodlarni yuboring.",
+            reply_markup=get_jild_codes_keyboard(),
+        )
         return JILD_CODES
 
     if value == JILD_FINISH_TEXT:
         if not current_codes:
-            await update.message.reply_text("⛔ Hali birorta kod kiritilmadi.", reply_markup=get_jild_codes_keyboard())
+            await update.message.reply_text(
+                "Hali birorta kod kiritilmadi. Avval kod yuboring.",
+                reply_markup=get_jild_codes_keyboard(),
+            )
             return JILD_CODES
         d["jild_codes"] = sort_codes_for_folder(list(current_codes))
-        await update.message.reply_text("📝 Endi jild nomini yozing:", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(
+            "Endi jild nomini yozing:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
         return JILD_NAME
 
     parsed_codes, invalid_tokens = parse_codes_input(value)
     if not parsed_codes and invalid_tokens:
         await update.message.reply_text(
-            f"⛔ Noto'g'ri qiymat(lar): {', '.join(invalid_tokens)}\nTo'g'ri misol: 9 yoki 9 10 11 yoki 9-16",
+            f"Noto'g'ri qiymat(lar): {', '.join(invalid_tokens)}\n"
+            "To'g'ri misol: 9 yoki 9 10 11 yoki 9-16",
             reply_markup=get_jild_codes_keyboard(),
         )
         return JILD_CODES
     if not parsed_codes:
-        await update.message.reply_text("⛔ Kodlarni kiriting.", reply_markup=get_jild_codes_keyboard())
+        await update.message.reply_text(
+            "Kodlarni kiriting.",
+            reply_markup=get_jild_codes_keyboard(),
+        )
         return JILD_CODES
 
     try:
         existing_codes = set(get_existing_movie_codes(parsed_codes))
     except Exception:
-        logger.exception("Jild uchun kodlarni tekshirishda xato")
+        logger.exception("Jild uchun kodlarni tekshirishda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
 
@@ -1215,28 +1404,34 @@ async def jild_get_codes(update, context):
 
     message_lines = [
         f"✅ Qo'shildi: {len(new_codes)} ta",
-        f"📚 Jami yig'ilgan kodlar: {len(d['jild_codes'])} ta",
-        f"🧾 Ro'yxat: {format_codes_for_text(d['jild_codes'])}",
+        f"Jami yig'ilgan kodlar: {len(d['jild_codes'])} ta",
+        f"Ro'yxat: {format_codes_for_text(d['jild_codes'])}",
     ]
     if missing_codes:
         message_lines.append(f"⚠️ Topilmagan kodlar: {', '.join(missing_codes)}")
     if invalid_tokens:
         message_lines.append(f"⚠️ Noto'g'ri qiymat(lar): {', '.join(invalid_tokens)}")
     message_lines.append(f"Tayyor bo'lsa {JILD_FINISH_TEXT} tugmasini bosing.")
-    await update.message.reply_text("\n".join(message_lines), reply_markup=get_jild_codes_keyboard())
+    await update.message.reply_text(
+        "\n".join(message_lines),
+        reply_markup=get_jild_codes_keyboard(),
+    )
     return JILD_CODES
 
 
 async def jild_get_name(update, context):
     folder_name = update.message.text.strip()
     if not folder_name:
-        await update.message.reply_text("⛔ Jild nomi bo'sh bo'lmasin. Qayta yozing:")
+        await update.message.reply_text("Jild nomi bo'sh bo'lmasin. Qayta yozing:")
         return JILD_NAME
 
     d = context.user_data
     codes = d.get("jild_codes", [])
     if not codes:
-        await update.message.reply_text("⛔ Kodlar topilmadi. /jild ni qayta ishga tushiring.", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(
+            "Kodlar topilmadi. /jild buyrug'ini qayta ishga tushiring.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
         return ConversationHandler.END
 
     try:
@@ -1244,7 +1439,7 @@ async def jild_get_name(update, context):
         add_movies_to_folder(folder_name, codes)
         folder_movies = get_movies_for_folder(folder_name)
     except Exception:
-        logger.exception("Jildni saqlashda xato")
+        logger.exception("Jildni saqlashda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
 
@@ -1252,9 +1447,9 @@ async def jild_get_name(update, context):
     action_text = "yangilandi" if existed_before else "yaratildi"
     await update.message.reply_text(
         f"✅ Jild {action_text}.\n"
-        f"📂 Nomi: {folder_name}\n"
-        f"📚 Jilddagi kinolar: {len(folder_movies)} ta\n"
-        f"🧾 Kodlar: {format_codes_for_text([movie['code'] for movie in folder_movies])}",
+        f"Nomi: {folder_name}\n"
+        f"Jilddagi kinolar: {len(folder_movies)} ta\n"
+        f"Kodlar: {format_codes_for_text([movie['code'] for movie in folder_movies])}",
         reply_markup=ReplyKeyboardRemove(),
     )
     return ConversationHandler.END
@@ -1268,14 +1463,14 @@ async def cancel(update, context):
     return ConversationHandler.END
 
 
-# ==================== /edit ====================
+# ===================== EDIT =====================
 
 async def edit_start(update, context):
     remember_user(update)
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
         return
-    await update.message.reply_text("✏️ Tahrirlash uchun kino kodini kiriting:")
+    await update.message.reply_text("Tahrirlash uchun kino kodini kiriting:")
     return EDIT_KOD
 
 
@@ -1284,7 +1479,7 @@ async def edit_get_kod(update, context):
     try:
         data = get_movie(code)
     except Exception:
-        logger.exception("Kinoni qidirishda xato")
+        logger.exception("Kinoni qidirishda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
     if not data:
@@ -1293,21 +1488,24 @@ async def edit_get_kod(update, context):
     context.user_data['edit_code'] = code
     context.user_data['current_data'] = data
     await update.message.reply_text(
-        f"📋 Joriy ma'lumotlar:\n"
-        f"🎬 Nom: {data['nom']}\n"
-        f"🎥 Sifat: {data['sifat']}\n"
-        f"🌐 Til: {data['til']}\n"
-        f"⏱️ Davomiylik: {data['vaqt']}\n\n"
-        f"🎬 Yangi nomni kiriting (bo'sh qoldiring saqlash uchun):"
+        f"Joriy ma'lumotlar:\n"
+        f"Nom: {data['nom']}\n"
+        f"Sifat: {data['sifat']}\n"
+        f"Til: {data['til']}\n"
+        f"Davomiylik: {data['vaqt']}\n\n"
+        f"Yangi nomni kiriting (bo'sh qoldiring saqlash uchun):"
     )
     return EDIT_NOM
 
 
 async def edit_get_nom(update, context):
     new_nom = update.message.text.strip()
-    context.user_data['nom'] = new_nom if new_nom else context.user_data['current_data']['nom']
+    if new_nom:
+        context.user_data['nom'] = new_nom
+    else:
+        context.user_data['nom'] = context.user_data['current_data']['nom']
     await update.message.reply_text(
-        "🎥 Yangi sifatni tanlang (bo'sh qoldiring saqlash uchun):",
+        "Yangi sifatni tanlang yoki kiriting (bo'sh qoldiring saqlash uchun):",
         reply_markup=get_sifat_keyboard(),
     )
     return EDIT_SIFAT
@@ -1320,7 +1518,7 @@ async def edit_get_sifat(update, context):
     else:
         context.user_data['sifat'] = context.user_data['current_data']['sifat']
     await update.message.reply_text(
-        "🌐 Yangi tilni tanlang (bo'sh qoldiring saqlash uchun):",
+        "Yangi tilni tanlang yoki kiriting (bo'sh qoldiring saqlash uchun):",
         reply_markup=get_til_keyboard(),
     )
     return EDIT_TIL
@@ -1337,7 +1535,7 @@ async def edit_get_til(update, context):
     else:
         context.user_data['til'] = context.user_data['current_data']['til']
     await update.message.reply_text(
-        "⏱️ Yangi davomiylikni kiriting (bo'sh qoldiring saqlash uchun):",
+        "Yangi davomiylikni kiriting (bo'sh qoldiring saqlash uchun):",
         reply_markup=ReplyKeyboardRemove(),
     )
     return EDIT_VAQT
@@ -1362,27 +1560,30 @@ async def edit_get_vaqt(update, context):
     try:
         save_movie(code, data)
     except Exception:
-        logger.exception("Kinoni tahrirlashda xato")
+        logger.exception("Kinoni tahrirlashda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
-    await update.message.reply_text("✅ Tahrirlandi!", reply_markup=get_admin_menu_keyboard())
+    await update.message.reply_text(
+        "✅ Tahrirlandi!",
+        reply_markup=get_admin_menu_keyboard(),
+    )
     return ConversationHandler.END
 
 
-# ==================== /delete ====================
+# ===================== DELETE / FOYDALANUVCHI =====================
 
 async def delete_movie(update, context):
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
         return
     if not context.args:
-        await update.message.reply_text("📝 Ishlatish: /delete <kod>")
+        await update.message.reply_text("Ishlatish: /delete <kod>")
         return
     code = context.args[0]
     try:
         exists = movie_exists(code)
     except Exception:
-        logger.exception("Kinoni o'chirish uchun tekshiruvda xato")
+        logger.exception("Kinoni o'chirish uchun DB tekshiruvda xato yuz berdi")
         await reply_service_unavailable(update)
         return
     if not exists:
@@ -1391,137 +1592,76 @@ async def delete_movie(update, context):
     try:
         delete_movie_db(code)
     except Exception:
-        logger.exception("Kinoni o'chirishda xato")
+        logger.exception("Kinoni o'chirishda xato yuz berdi")
         await reply_service_unavailable(update)
         return
     await update.message.reply_text(f"🗑️ {code} kodli kino o'chirildi.")
 
-
-# ==================== /foydalanuvchi ====================
 
 async def show_user_count(update, context):
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
         return
     if not context.args or context.args[0] != "777":
-        await update.message.reply_text("📝 Ishlatish: /foydalanuvchi 777")
+        await update.message.reply_text("Ishlatish: /foydalanuvchi 777")
         return
     try:
         total_users = get_tracked_user_count()
     except Exception:
-        logger.exception("Foydalanuvchilar sonini olishda xato")
+        logger.exception("Foydalanuvchilar sonini olishda xato yuz berdi")
         await reply_service_unavailable(update)
         return
-    await update.message.reply_text(f"👥 Foydalanuvchilar soni: {total_users}")
+    await update.message.reply_text(f"Foydalanuvchilar soni: {total_users}")
 
 
-# ==================== /serialadd, /seriallist ====================
-
-async def add_series_range(update, context):
-    remember_user(update)
-    user_id = update.message.from_user.id
-    if user_id != ADMIN_ID:
-        return
-    if len(context.args) < 3:
-        await update.message.reply_text("📝 Ishlatish: /serialadd <boshlanish_kodi> <tugash_kodi> <nom>")
-        return
-
-    start_code_num = parse_numeric_code(context.args[0])
-    end_code_num = parse_numeric_code(context.args[1])
-    title = " ".join(context.args[2:]).strip()
-
-    if start_code_num is None or end_code_num is None or not title:
-        await update.message.reply_text("❌ Kodlar faqat raqam bo'lsin va nom ham yozilsin.")
-        return
-    if start_code_num > end_code_num:
-        await update.message.reply_text("❌ Boshlanish kodi tugash kodidan katta bo'lmasligi kerak.")
-        return
-
-    try:
-        overlaps = get_overlapping_series_ranges(start_code_num, end_code_num)
-    except Exception:
-        logger.exception("Serial diapazonlarini tekshirishda xato")
-        await reply_service_unavailable(update)
-        return
-
-    conflicting_ranges = [
-        item for item in overlaps
-        if item["start_code_num"] != start_code_num or item["end_code_num"] != end_code_num
-    ]
-    if conflicting_ranges:
-        conflict = conflicting_ranges[0]
-        await update.message.reply_text(
-            f"⚠️ Bu oraliq boshqa guruh bilan ustma-ust keladi:\n"
-            f"🎞️ {conflict['title']}\n"
-            f"🧾 {conflict['start_code_num']} - {conflict['end_code_num']}"
-        )
-        return
-
-    try:
-        movies = get_movies_in_range(start_code_num, end_code_num)
-    except Exception:
-        logger.exception("Serial diapazonidagi kinolarni olishda xato")
-        await reply_service_unavailable(update)
-        return
-
-    if not movies:
-        await update.message.reply_text("❌ Bu oraliqda hali kino topilmadi. Avval kinolarni qo'shib oling.")
-        return
-
-    try:
-        save_series_range(start_code_num, end_code_num, title)
-    except Exception:
-        logger.exception("Serial diapazonini saqlashda xato")
-        await reply_service_unavailable(update)
-        return
-
-    await update.message.reply_text(
-        f"✅ Qismlar guruhi saqlandi.\n"
-        f"🎞️ Nomi: {title}\n"
-        f"🧾 Oraliq: {start_code_num} - {end_code_num}\n"
-        f"📚 Topilgan qismlar: {len(movies)} ta"
-    )
-
+# ===================== SERIAL LIST =====================
 
 async def list_series_ranges(update, context):
     remember_user(update)
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
         return
+
     try:
         ranges = get_all_series_ranges()
     except Exception:
-        logger.exception("Serial diapazonlari ro'yxatini olishda xato")
+        logger.exception("Serial diapazonlari ro'yxatini olishda xato yuz berdi")
         await reply_service_unavailable(update)
         return
+
     if not ranges:
-        await update.message.reply_text("📭 Hali birorta ham qismlar guruhi saqlanmagan.")
+        await update.message.reply_text("Hali birorta ham serial diapazon saqlanmagan.")
         return
-    lines = ["🎞️ Qismlar guruhlari:"]
+
+    lines = ["Serial diapazonlari:"]
     for item in ranges:
         lines.append(f"{item['start_code_num']}-{item['end_code_num']} | {item['title']}")
     await update.message.reply_text("\n".join(lines))
 
 
-# ==================== Callback handlers ====================
+# ===================== CALLBACKS =====================
 
 async def handle_series_part_callback(update, context):
     remember_user(update)
     query = update.callback_query
     if query is None or query.message is None:
         return
+
     await query.answer()
     code = query.data[len(SERIES_CALLBACK_PREFIX):]
     user_id = update.effective_user.id if update.effective_user else None
+
     try:
         data = get_movie(code)
     except Exception:
-        logger.exception("Qism bo'yicha kinoni olishda xato")
+        logger.exception("Qism bo'yicha kinoni olishda xato yuz berdi")
         await reply_service_unavailable(update)
         return
+
     if not data:
         await query.message.reply_text(f"❌ {code} kodli kino topilmadi.")
         return
+
     increment_view_count(code)
     await send_movie_to_chat(query.message, code, data, user_id=user_id)
 
@@ -1531,22 +1671,24 @@ async def handle_favorite_callback(update, context):
     query = update.callback_query
     if query is None:
         return
+
     await query.answer()
     user_id = update.effective_user.id
     code = query.data[len("fav:"):]
+
     try:
         in_fav = is_favorite(user_id, code)
         if in_fav:
             remove_from_favorites(user_id, code)
             new_text = "🤍 Sevimlilarga qo'shish"
-            notice = "💔 Sevimlilardan olib tashlandi."
+            notice = "Sevimlilardan olib tashlandi."
         else:
             add_to_favorites(user_id, code)
             new_text = "❤️ Sevimlilardan chiqarish"
             notice = "❤️ Sevimlilarga qo'shildi!"
     except Exception:
         logger.exception("Sevimlilarni yangilashda xato")
-        await query.answer("Xato yuz berdi.", show_alert=True)
+        await query.answer("Xato yuz berdi. Keyinroq urinib ko'ring.", show_alert=True)
         return
 
     try:
@@ -1568,42 +1710,55 @@ async def handle_favorite_callback(update, context):
     await query.answer(notice, show_alert=True)
 
 
-# ==================== /sevimli ====================
+# ===================== SEVIMLILAR =====================
 
 async def show_favorites(update, context):
     remember_user(update)
     user_id = update.message.from_user.id
+
     try:
         fav_codes = get_favorites(user_id)
     except Exception:
         logger.exception("Sevimlilarni olishda xato")
         await reply_service_unavailable(update)
         return
+
     if not fav_codes:
         await update.message.reply_text(
-            "💔 Sevimlilar ro'yxatingiz hali bo'sh.\n\nKino ko'rganingizda 🤍 tugmani bosib qo'shing!"
+            "Sevimlilar ro'yxatingiz hali bo'sh.\n\n"
+            "Kino ko'rganingizda pastdagi 🤍 tugmani bosib qo'shing!"
         )
         return
+
     try:
-        movies_info = run_db(lambda col: list(col.find({"code": {"$in": fav_codes}}, {"_id": 0, "code": 1, "nom": 1})))
+        movies_info = run_db(
+            lambda col: list(col.find(
+                {"code": {"$in": fav_codes}},
+                {"_id": 0, "code": 1, "nom": 1}
+            ))
+        )
     except Exception:
         logger.exception("Sevimli kinolar ma'lumotlarini olishda xato")
         await reply_service_unavailable(update)
         return
+
     code_to_nom = {m["code"]: m.get("nom", "-") for m in movies_info}
     lines = [f"❤️ Sevimli kinolaringiz ({len(fav_codes)} ta):\n"]
     for i, code in enumerate(fav_codes, start=1):
         nom = code_to_nom.get(code, "Noma'lum")
-        lines.append(f"{i}. 🎬 {nom}  |  🆔 Kod: {code}")
-    lines.append("\n📌 Kino olish uchun kodini yuboring.")
+        lines.append(f"{i}. {nom}  |  Kod: {code}")
+    lines.append("\nKino olish uchun kodini yuboring.")
     await update.message.reply_text("\n".join(lines))
 
 
-# ==================== Ko'rilish soni / /top ====================
+# ===================== KO'RILISH SONI =====================
 
 def increment_view_count(code):
     try:
-        run_db(lambda col: col.update_one({"code": code}, {"$inc": {"views": 1}}))
+        run_db(lambda col: col.update_one(
+            {"code": code},
+            {"$inc": {"views": 1}},
+        ))
     except Exception:
         pass
 
@@ -1630,6 +1785,7 @@ async def admin_top_movies(update, context):
                 {"$project": {"_id": 0, "code": 1, "nom": 1, "views": 1}},
             ]
             return list(col.aggregate(pipeline))
+
         top_movies = run_db(operation)
     except Exception:
         logger.exception("Top kinolarni olishda xato")
@@ -1637,15 +1793,15 @@ async def admin_top_movies(update, context):
         return
 
     if not top_movies:
-        await update.message.reply_text("📊 Hali birorta ham kino ko'rilmagan.")
+        await update.message.reply_text("Hali birorta ham kino ko'rilmagan.")
         return
 
-    lines = [f"🏆 Eng ko'p ko'rilgan {len(top_movies)} ta kino:\n"]
+    lines = [f"Eng ko'p ko'rilgan {len(top_movies)} ta kino:\n"]
     for i, movie in enumerate(top_movies, start=1):
         nom = movie.get("nom", "-")
         code = movie.get("code", "-")
         views = movie.get("views", 0)
-        lines.append(f"{i}. 🎬 {nom}  |  🆔 {code}  |  👁 {views} marta")
+        lines.append(f"{i}. {nom}  |  Kod: {code}  |  {views} marta")
 
     text = "\n".join(lines)
     if len(text) <= 4096:
@@ -1665,18 +1821,19 @@ async def admin_top_movies(update, context):
             await update.message.reply_text(chunk)
 
 
-# ==================== Asosiy xabar handleri ====================
-
-async def unknown_command(update, context):
-    await update.message.reply_text("❓ Bu komanda mavjud emas. 🎬 Kino kodini yozing.")
-
+# ===================== ASOSIY MESSAGE HANDLER =====================
 
 async def handle_message(update, context):
     remember_user(update)
     user_id = update.message.from_user.id
     text = update.message.text.strip()
 
-    # Verification (faqat foydalanuvchilar uchun)
+    # Broadcast rejimida admin matni
+    if user_id == ADMIN_ID and _broadcast_active:
+        await handle_admin_broadcast_message(update, context)
+        return
+
+    # Verification tekshiruvi (faqat oddiy foydalanuvchilar)
     if user_id != ADMIN_ID:
         started_at = get_user_started_at(user_id)
         if started_at is None:
@@ -1685,24 +1842,28 @@ async def handle_message(update, context):
                 "⬇️ Tugmani bosing:",
                 reply_markup=get_verification_keyboard(),
             )
-            await update.message.reply_text("⏳ Start bosgandan so'ng 10 soniya kuting va qayta yuboring.")
+            await update.message.reply_text(
+                "⏳ Start bosgandan so'ng 10 soniya kuting va qayta yuboring."
+            )
             return
 
         elapsed = int(time.time()) - started_at
         if elapsed < VERIFICATION_WAIT_SECONDS:
             remaining = VERIFICATION_WAIT_SECONDS - elapsed
-            await update.message.reply_text(f"⏳ Iltimos, yana {remaining} soniya kuting va qayta yuboring.")
+            await update.message.reply_text(
+                f"⏳ Iltimos, yana {remaining} soniya kuting va qayta yuboring."
+            )
             return
 
     if not text.isdigit():
-        await update.message.reply_text("🎬 Kino kodini yozing.")
+        await update.message.reply_text("Kino kodini yozing.")
         return
 
     code = text
     try:
         folder_data = get_folder_by_code(code)
     except Exception:
-        logger.exception("Kino jildini qidirishda xato")
+        logger.exception("Kino jildini qidirishda xato yuz berdi")
         await reply_service_unavailable(update)
         return
 
@@ -1710,7 +1871,7 @@ async def handle_message(update, context):
         try:
             folder_movies = get_movies_for_folder(folder_data["name"])
         except Exception:
-            logger.exception("Jilddagi kinolarni olishda xato")
+            logger.exception("Jilddagi kinolarni olishda xato yuz berdi")
             await reply_service_unavailable(update)
             return
         if folder_movies:
@@ -1720,7 +1881,7 @@ async def handle_message(update, context):
     try:
         series_data = get_series_range_by_code(code)
     except Exception:
-        logger.exception("Seriyani qidirishda xato")
+        logger.exception("Kinoni qidirishda xato yuz berdi")
         await reply_service_unavailable(update)
         return
 
@@ -1728,7 +1889,7 @@ async def handle_message(update, context):
         try:
             movies = get_movies_in_range(series_data["start_code_num"], series_data["end_code_num"])
         except Exception:
-            logger.exception("Qismlar guruhidagi kinolarni olishda xato")
+            logger.exception("Qismlar guruhidagi kinolarni olishda xato yuz berdi")
             await reply_service_unavailable(update)
             return
         if movies:
@@ -1738,7 +1899,7 @@ async def handle_message(update, context):
     try:
         data = get_movie(code)
     except Exception:
-        logger.exception("Kinoni qidirishda xato")
+        logger.exception("Kinoni qidirishda xato yuz berdi")
         await reply_service_unavailable(update)
         return
 
@@ -1750,12 +1911,12 @@ async def handle_message(update, context):
     await send_movie_to_chat(update.message, code, data, user_id=user_id)
 
 
-# ==================== Ilovani qurish ====================
+# ===================== BUILD APPLICATION =====================
 
 def build_application():
     ensure_telegram_imports()
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN topilmadi.")
+        raise RuntimeError("BOT_TOKEN topilmadi. Environment variable sifatida sozlang.")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_error_handler(log_error)
@@ -1803,50 +1964,43 @@ def build_application():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    # /adminlik — bitta xabar yuborish va avtomatik to'xtash
-    broadcast_conv = ConversationHandler(
-        entry_points=[CommandHandler("adminlik", admin_broadcast_start)],
-        states={
-            BROADCAST_STATE: [
-                MessageHandler(
-                    (
-                        filters.TEXT
-                        | filters.PHOTO
-                        | filters.VIDEO
-                        | filters.AUDIO
-                        | filters.VOICE
-                        | filters.Document.ALL
-                        | filters.Sticker.ALL
-                        | filters.VIDEO_NOTE
-                        | filters.ANIMATION
-                    ) & filters.User(ADMIN_ID),
-                    admin_broadcast_send,
-                ),
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
+    # Command handlers
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", user_help))
     app.add_handler(CommandHandler("delete", delete_movie))
     app.add_handler(CommandHandler("foydalanuvchi", show_user_count))
-    app.add_handler(CommandHandler("serialadd", add_series_range))
     app.add_handler(CommandHandler("seriallist", list_series_ranges))
     app.add_handler(CommandHandler("sevimli", show_favorites))
     app.add_handler(CommandHandler("top", admin_top_movies))
+    app.add_handler(CommandHandler("help", admin_help))
+    app.add_handler(CommandHandler("stat", admin_stat))
+    app.add_handler(CommandHandler("adminlik", admin_broadcast_start))
+    app.add_handler(CommandHandler("adminlikni_toxtatish", admin_broadcast_stop))
 
+    # Conversation handlers
     app.add_handler(conv)
     app.add_handler(edit_conv)
     app.add_handler(jild_conv)
-    app.add_handler(broadcast_conv)
 
+    # Broadcast — rasm, ovoz, stiker va boshqalar uchun alohida handler
+    app.add_handler(MessageHandler(
+        (
+            filters.PHOTO
+            | filters.AUDIO
+            | filters.VOICE
+            | filters.Sticker.ALL
+            | filters.VIDEO_NOTE
+            | filters.ANIMATION
+        ) & filters.User(ADMIN_ID),
+        handle_admin_broadcast_message,
+    ))
+
+    # Callback handlers
     app.add_handler(CallbackQueryHandler(handle_series_part_callback, pattern=f"^{SERIES_CALLBACK_PREFIX}"))
     app.add_handler(CallbackQueryHandler(handle_favorite_callback, pattern="^fav:"))
+    app.add_handler(CallbackQueryHandler(admin_broadcast_stop_callback, pattern="^stop_broadcast$"))
 
     app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
     return app
 
 
@@ -1862,7 +2016,7 @@ def run_bot_forever():
             logger.warning("Polling to'xtadi. 5 soniyadan keyin qayta ishga tushadi.")
             set_health_state(bot="stopped")
         except Exception as exc:
-            logger.exception("Bot ishida xato yuz berdi.")
+            logger.exception("Bot ishida xato yuz berdi. 5 soniyadan keyin qayta urinish bo'ladi.")
             set_health_state(bot="error", last_error=str(exc))
         time.sleep(5)
 
