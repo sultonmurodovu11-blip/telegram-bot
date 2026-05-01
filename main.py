@@ -452,15 +452,13 @@ def get_movies_for_folder(folder_name):
 # ===================== VERIFICATION FUNKSIYALARI =====================
 
 def mark_user_started(user_id):
-    """Foydalanuvchi /start bosganini qayd etadi (faqat birinchi marta)."""
     run_users_db(
         lambda col: col.update_one(
-            {"user_id": user_id},
-            {"$setOnInsert": {"started_at": int(time.time())}},
+            {"user_id": user_id, "started_at": {"$exists": False}},
+            {"$set": {"started_at": int(time.time())}},
             upsert=True,
         )
-    )
-
+    )   
 
 def get_user_started_at(user_id):
     """Foydalanuvchi qachon /start bosganini qaytaradi. Bosmagan bo'lsa None."""
