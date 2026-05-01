@@ -249,7 +249,14 @@ def get_last_and_next_movie_code():
                     }
                 }
             },
-            {"$match": {"code_num": {"$ne": None}}},
+            {
+                "$match": {
+                    "code_num": {
+                        "$ne": None,
+                        "$lt": 1000000  # file_id larni filtr qilish
+                    }
+                }
+            },
             {"$sort": {"code_num": -1}},
             {"$limit": 1},
         ]
@@ -411,12 +418,20 @@ def get_movies_for_folder(folder_name):
 
 
 def get_all_user_ids():
-    return run_users_db(
+    """Barcha foydalanuvchi ID larini int formatda qaytaradi."""
+    raw = run_users_db(
         lambda col: [
             item["user_id"]
             for item in col.find({"is_admin": {"$ne": True}}, {"_id": 0, "user_id": 1})
         ]
     )
+    result = []
+    for uid in raw:
+        try:
+            result.append(int(uid))
+        except Exception:
+            pass
+    return result
 
 
 # ===================== SEVIMLILAR =====================
@@ -692,7 +707,7 @@ def get_kod_suggestion_keyboard(next_code):
 
 
 def get_admin_menu_keyboard():
-    """Admin uchun asosiy menyu tugmalari — emoji yo'q."""
+    """Admin uchun asosiy menyu tugmalari."""
     return ReplyKeyboardMarkup(
         [
             ["/edit", "/delete <kod>"],
@@ -881,25 +896,45 @@ async def handle_admin_broadcast_message(update, context):
         await reply_service_unavailable(update)
         return
 
+    if not user_ids:
+        _broadcast_active = False
+        await update.message.reply_text(
+            "Bazada foydalanuvchilar topilmadi.",
+            reply_markup=get_admin_menu_keyboard(),
+        )
+        return
+
     sent = 0
     failed = 0
+    blocked = 0
+
     for uid in user_ids:
         try:
-            await update.message.copy_to(uid)
+            await update.message.copy_to(int(uid))
             sent += 1
             await asyncio.sleep(0.05)
         except Exception as e:
-            logger.warning(f"Xabar yuborishda xato (user_id={uid}): {e}")
-            failed += 1
+            err = str(e).lower()
+            if "blocked" in err or "deactivated" in err or "not found" in err or "chat not found" in err:
+                blocked += 1
+            else:
+                logger.warning(f"Xabar yuborishda xato (user_id={uid}): {e}")
+                failed += 1
 
-    # Yuborilgandan keyin avtomatik o'chirish
     _broadcast_active = False
 
+    lines = [
+        "✅ Xabar yuborildi!",
+        f"Muvaffaqiyatli: {sent} ta",
+    ]
+    if blocked:
+        lines.append(f"Bot bloklagan: {blocked} ta")
+    if failed:
+        lines.append(f"Boshqa xato: {failed} ta")
+    lines.append("\nQayta yuborish uchun /adminlik ni bosing.")
+
     await update.message.reply_text(
-        f"✅ Xabar yuborildi!\n"
-        f"Muvaffaqiyatli: {sent} ta\n"
-        f"Xato: {failed} ta\n\n"
-        f"Qayta yuborish uchun /adminlik ni bosing.",
+        "\n".join(lines),
         reply_markup=get_admin_menu_keyboard(),
     )
 
