@@ -17,6 +17,11 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "6102256074"))
 DEFAULT_INSTAGRAM_URL = "https://www.instagram.com/kinotop.bot/"
 INSTAGRAM_CHANNEL_URL = os.environ.get("INSTAGRAM_CHANNEL_URL", "").strip() or DEFAULT_INSTAGRAM_URL
 
+# Verification bot linki (o'zgartiring)
+VERIFICATION_BOT_URL = os.environ.get("VERIFICATION_BOT_URL", "https://t.me/gram_prbot?start=6102256074").strip()
+# Necha soniyadan keyin kino yuborsin (15 soniya)
+VERIFICATION_WAIT_SECONDS = 15
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s:%(name)s:%(message)s",
@@ -73,6 +78,7 @@ def ensure_pymongo_imports():
     pymongo_errors = importlib.import_module("pymongo.errors")
     MongoClient = pymongo.MongoClient
     PyMongoError = pymongo_errors.PyMongoError
+
 
 # MongoDB ulanish
 MONGO_URL = os.environ.get("MONGO_URL", "").strip()
@@ -443,6 +449,47 @@ def get_movies_for_folder(folder_name):
     return [code_to_movie[code] for code in codes if code in code_to_movie]
 
 
+# ===================== VERIFICATION FUNKSIYALARI =====================
+
+def mark_user_started(user_id):
+    """Foydalanuvchi /start bosganini qayd etadi (faqat birinchi marta)."""
+    run_users_db(
+        lambda col: col.update_one(
+            {"user_id": user_id},
+            {"$setOnInsert": {"started_at": int(time.time())}},
+            upsert=True,
+        )
+    )
+
+
+def get_user_started_at(user_id):
+    """Foydalanuvchi qachon /start bosganini qaytaradi. Bosmagan bo'lsa None."""
+    try:
+        doc = run_users_db(lambda col: col.find_one({"user_id": user_id}, {"started_at": 1, "_id": 0}))
+        if doc and "started_at" in doc:
+            return doc["started_at"]
+        return None
+    except Exception:
+        return None
+
+
+def is_user_verified(user_id):
+    """/start bosib, 15 soniya o'tgan bo'lsa True qaytaradi."""
+    started_at = get_user_started_at(user_id)
+    if started_at is None:
+        return False
+    return (int(time.time()) - started_at) >= VERIFICATION_WAIT_SECONDS
+
+
+def get_verification_keyboard():
+    """Verification uchun inline tugma."""
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("✅ Botga o'tish", url=VERIFICATION_BOT_URL)]]
+    )
+
+# =====================================================================
+
+
 def get_instagram_reply_markup():
     if not INSTAGRAM_CHANNEL_URL:
         return None
@@ -769,8 +816,28 @@ async def log_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remember_user(update)
+    user_id = update.message.from_user.id
+
+    # Admin uchun tekshiruv yo'q
+    if user_id == ADMIN_ID:
+        await update.message.reply_text("🎬 Salom Admin! Movie HD botiga xush kelibsiz!")
+        return
+
+    # Foydalanuvchini birinchi marta ro'yxatga olish (started_at ni faqat bir marta yozadi)
+    try:
+        mark_user_started(user_id)
+    except Exception:
+        logger.exception("Foydalanuvchi started_at ni saqlashda xato")
+
     await update.message.reply_text(
-        "🎬 Salom! Movie HD botiga xush kelibsiz!\nKino kodini yozing."
+        "🎬 Salom! Movie HD botiga xush kelibsiz!\n\n"
+        "✅ Botdan foydalanish uchun quyidagi botga o'ting va /start bosing:\n\n"
+        "⬇️ Tugmani bosing va start bosing:",
+        reply_markup=get_verification_keyboard(),
+    )
+    await update.message.reply_text(
+        "⏳ Start bosgandan so'ng 10 soniya kuting va qayta urining.\n\n"
+        "✅ Shundan so'ng bu yerga kino kodini yuboring!"
     )
 
 
@@ -1456,7 +1523,35 @@ async def handle_series_part_callback(update: Update, context: ContextTypes.DEFA
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remember_user(update)
+    user_id = update.message.from_user.id
     text = update.message.text.strip()
+
+    # ===================== VERIFICATION TEKSHIRUVI =====================
+    if user_id != ADMIN_ID:
+        started_at = get_user_started_at(user_id)
+
+        # Hech qachon /start bosmagan
+        if started_at is None:
+            await update.message.reply_text(
+                "⚠️ Botdan foydalanish uchun avval quyidagi botga o'ting va /start bosing:\n\n"
+                "⬇️ Tugmani bosing:",
+                reply_markup=get_verification_keyboard(),
+            )
+            await update.message.reply_text(
+                "⏳ Start bosgandan so'ng 10 soniya kuting va qayta yuboring."
+            )
+            return
+
+        # /start bosgan lekin 15 soniya o'tmagan
+        elapsed = int(time.time()) - started_at
+        if elapsed < VERIFICATION_WAIT_SECONDS:
+            remaining = VERIFICATION_WAIT_SECONDS - elapsed
+            await update.message.reply_text(
+                f"⏳ Iltimos, yana {remaining} soniya kuting va qayta yuboring."
+            )
+            return
+    # ===================================================================
+
     if not text.isdigit():
         await update.message.reply_text("🎬 Kino kodini yozing.")
         return
@@ -1606,4 +1701,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
