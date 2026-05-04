@@ -239,14 +239,8 @@ def get_movie_by_file_id(file_id):
     }
 
 
-# ===================== FIX #3: ENG OXIRGI KIRITILGAN KOD (_id bo'yicha) =====================
 def get_last_and_next_movie_code():
-    """
-    Eng oxirgi _id bo'yicha (ya'ni eng oxirgi qo'shilgan) kodni topadi.
-    Shunday qilib, katta raqamli eski kod emas, haqiqatan oxirgi kiritilgan kod +1 tavsiya qilinadi.
-    """
     def operation(col):
-        # Faqat raqamli kodlarni olib, eng oxirgi _id bo'yicha sort qilamiz
         pipeline = [
             {
                 "$addFields": {
@@ -259,11 +253,10 @@ def get_last_and_next_movie_code():
                 "$match": {
                     "code_num": {
                         "$ne": None,
-                        "$lt": 1000000  # file_id larni filtr qilish
+                        "$lt": 1000000
                     }
                 }
             },
-            # _id bo'yicha kamayish tartibida — eng oxirgi qo'shilgan birinchi chiqadi
             {"$sort": {"_id": -1}},
             {"$limit": 1},
         ]
@@ -425,7 +418,6 @@ def get_movies_for_folder(folder_name):
 
 
 def get_all_user_ids():
-    """Barcha foydalanuvchi ID larini int formatda qaytaradi."""
     raw = run_users_db(
         lambda col: [
             item["user_id"]
@@ -840,10 +832,7 @@ async def unknown_command(update, context):
     await update.message.reply_text("❓ Bu komanda mavjud emas. Kino kodini yozing.")
 
 
-# ===================== FIX #2: VIDEO DAVOMIYLIGINI SEKUNDDAN HH:MM:SS GA O'GIRISH =====================
-
 def seconds_to_hhmmss(seconds: int) -> str:
-    """Sekundni HH:MM:SS formatga o'giradi."""
     if not seconds or seconds <= 0:
         return "-"
     hours = seconds // 3600
@@ -863,6 +852,9 @@ async def admin_broadcast_start(update, context):
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
         return
+
+    # ✅ FIX: Aktiv conversation'ni tozalash — eng muhim qator
+    context.user_data.clear()
 
     _broadcast_active = True
     await update.message.reply_text(
@@ -901,8 +893,6 @@ async def admin_broadcast_stop_callback(update, context):
     )
 
 
-# ===================== FIX #1: BROADCAST — copy_to(chat_id=uid) =====================
-
 async def handle_admin_broadcast_message(update, context):
     """Broadcast rejimida admin xabarini barcha foydalanuvchilarga yuboradi."""
     global _broadcast_active
@@ -934,7 +924,6 @@ async def handle_admin_broadcast_message(update, context):
 
     for uid in user_ids:
         try:
-            # FIX: chat_id keyword argument bilan to'g'ri chaqiriladi
             await update.message.copy_to(chat_id=int(uid))
             sent += 1
             await asyncio.sleep(0.05)
@@ -1033,7 +1022,7 @@ async def admin_stat(update, context):
     )
 
 
-# ===================== FIX #2: VIDEO/DOCUMENT QABUL QILISH =====================
+# ===================== VIDEO/DOCUMENT QABUL QILISH =====================
 
 async def handle_video(update, context):
     global _broadcast_active
@@ -1041,7 +1030,6 @@ async def handle_video(update, context):
     if user_id != ADMIN_ID:
         return
 
-    # Broadcast rejimida bo'lsa — broadcast handler ishlasin
     if _broadcast_active:
         await handle_admin_broadcast_message(update, context)
         return
@@ -1065,7 +1053,6 @@ async def handle_video(update, context):
         )
         return ConversationHandler.END
 
-    # FIX #2: Video davomiyligini avtomatik olish
     duration_seconds = update.message.video.duration or 0
     if duration_seconds > 0:
         auto_vaqt = seconds_to_hhmmss(duration_seconds)
@@ -1100,14 +1087,12 @@ async def handle_document(update, context):
     if user_id != ADMIN_ID:
         return
 
-    # Broadcast rejimida bo'lsa — broadcast handler ishlasin
     if _broadcast_active:
         await handle_admin_broadcast_message(update, context)
         return
 
     context.user_data["file_id"] = update.message.document.file_id
     context.user_data["file_type"] = "document"
-    # Document uchun davomiylik yo'q — qo'lda kiritiladi
     context.user_data["vaqt_auto"] = False
     context.user_data.pop("vaqt_draft", None)
     context.user_data.pop("vaqt_locked", None)
@@ -1235,7 +1220,6 @@ async def get_til(update, context):
                 break
         d["til"] = value or DEFAULT_TIL
 
-    # FIX #2: Video bo'lsa davomiylik allaqachon bor — VAQT qadamini o'tkazib yuboramiz
     if d.get("vaqt_auto"):
         await send_confirm_prompt(update, d)
         return CONFIRM
@@ -1248,7 +1232,6 @@ async def get_til(update, context):
 
 
 async def get_vaqt(update, context):
-    # Bu qadam faqat document uchun chaqiriladi (video uchun o'tkazib yuboriladi)
     d = context.user_data
     d["vaqt"] = update.message.text.strip() or DEFAULT_VAQT
     await send_confirm_prompt(update, d)
@@ -1918,7 +1901,7 @@ async def handle_message(update, context):
     user_id = update.message.from_user.id
     text = update.message.text.strip()
 
-    # Broadcast rejimida admin matni
+    # ✅ FIX: Broadcast rejimida admin matni — ENG BIRINCHI tekshiruv
     if user_id == ADMIN_ID and _broadcast_active:
         await handle_admin_broadcast_message(update, context)
         return
@@ -2029,6 +2012,9 @@ def build_application():
             FOLDER_PICK:   [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), handle_folder_pick)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        # ✅ FIX: conversation ichida ham broadcast ishlashi uchun
+        per_message=False,
+        allow_reentry=True,
     )
 
     # Tahrirlash conversation
@@ -2042,6 +2028,7 @@ def build_application():
             EDIT_VAQT: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), edit_get_vaqt)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
     )
 
     # Jild yaratish conversation
@@ -2052,6 +2039,7 @@ def build_application():
             JILD_NAME:  [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), jild_get_name)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
     )
 
     # Command handlers
@@ -2066,10 +2054,19 @@ def build_application():
     app.add_handler(CommandHandler("adminlik", admin_broadcast_start))
     app.add_handler(CommandHandler("adminlikni_toxtatish", admin_broadcast_stop))
 
-    # Conversation handlers
-    app.add_handler(conv)
-    app.add_handler(edit_conv)
-    app.add_handler(jild_conv)
+    # ✅ FIX: Broadcast text handler — conversation'lardan OLDIN, group=0
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
+            handle_message,
+        ),
+        group=0,
+    )
+
+    # ✅ FIX: Conversation handler'lar — group=1 (broadcast'dan keyin)
+    app.add_handler(conv, group=1)
+    app.add_handler(edit_conv, group=1)
+    app.add_handler(jild_conv, group=1)
 
     # Broadcast — rasm, ovoz, stiker va boshqalar uchun alohida handler
     app.add_handler(MessageHandler(
