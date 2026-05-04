@@ -239,8 +239,14 @@ def get_movie_by_file_id(file_id):
     }
 
 
+# ===================== FIX #3: ENG OXIRGI KIRITILGAN KOD (_id bo'yicha) =====================
 def get_last_and_next_movie_code():
+    """
+    Eng oxirgi _id bo'yicha (ya'ni eng oxirgi qo'shilgan) kodni topadi.
+    Shunday qilib, katta raqamli eski kod emas, haqiqatan oxirgi kiritilgan kod +1 tavsiya qilinadi.
+    """
     def operation(col):
+        # Faqat raqamli kodlarni olib, eng oxirgi _id bo'yicha sort qilamiz
         pipeline = [
             {
                 "$addFields": {
@@ -257,7 +263,8 @@ def get_last_and_next_movie_code():
                     }
                 }
             },
-            {"$sort": {"code_num": -1}},
+            # _id bo'yicha kamayish tartibida — eng oxirgi qo'shilgan birinchi chiqadi
+            {"$sort": {"_id": -1}},
             {"$limit": 1},
         ]
         latest = next(col.aggregate(pipeline), None)
@@ -707,7 +714,6 @@ def get_kod_suggestion_keyboard(next_code):
 
 
 def get_admin_menu_keyboard():
-    """Admin uchun asosiy menyu tugmalari."""
     return ReplyKeyboardMarkup(
         [
             ["/edit", "/delete <kod>"],
@@ -834,6 +840,21 @@ async def unknown_command(update, context):
     await update.message.reply_text("❓ Bu komanda mavjud emas. Kino kodini yozing.")
 
 
+# ===================== FIX #2: VIDEO DAVOMIYLIGINI SEKUNDDAN HH:MM:SS GA O'GIRISH =====================
+
+def seconds_to_hhmmss(seconds: int) -> str:
+    """Sekundni HH:MM:SS formatga o'giradi."""
+    if not seconds or seconds <= 0:
+        return "-"
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    else:
+        return f"{minutes}:{secs:02d}"
+
+
 # ===================== BROADCAST =====================
 
 async def admin_broadcast_start(update, context):
@@ -845,10 +866,11 @@ async def admin_broadcast_start(update, context):
 
     _broadcast_active = True
     await update.message.reply_text(
-        "Ommaviy xabar rejimi yoqildi!\n\n"
+        "📢 Ommaviy xabar rejimi yoqildi!\n\n"
         "Endi yuborgan har qanday narsa (matn, rasm, video, ovoz, hujjat, stiker) "
         "barcha foydalanuvchilarga yuboriladi.\n\n"
         "Xabarni yuboring — yuborilgandan so'ng rejim avtomatik o'chadi.",
+        reply_markup=get_broadcast_stop_keyboard(),
     )
 
 
@@ -878,6 +900,8 @@ async def admin_broadcast_stop_callback(update, context):
         reply_markup=get_admin_menu_keyboard(),
     )
 
+
+# ===================== FIX #1: BROADCAST — copy_to(chat_id=uid) =====================
 
 async def handle_admin_broadcast_message(update, context):
     """Broadcast rejimida admin xabarini barcha foydalanuvchilarga yuboradi."""
@@ -910,7 +934,8 @@ async def handle_admin_broadcast_message(update, context):
 
     for uid in user_ids:
         try:
-            await update.message.copy_to(int(uid))
+            # FIX: chat_id keyword argument bilan to'g'ri chaqiriladi
+            await update.message.copy_to(chat_id=int(uid))
             sent += 1
             await asyncio.sleep(0.05)
         except Exception as e:
@@ -950,7 +975,8 @@ async def admin_help(update, context):
     help_text = (
         "Admin buyruqlari:\n\n"
         "Kino qo'shish:\n"
-        "  Video yoki fayl yuboring — kod, nom, sifat, til, vaqt so'raladi\n\n"
+        "  Video yoki fayl yuboring — kod, nom, sifat, til so'raladi\n"
+        "  (Video uchun davomiylik avtomatik aniqlanadi)\n\n"
         "Tahrirlash:\n"
         "  /edit — kino ma'lumotlarini yangilash\n\n"
         "O'chirish:\n"
@@ -970,7 +996,8 @@ async def admin_help(update, context):
         "Sevimlilar:\n"
         "  /sevimli — o'z sevimlilar ro'yxatini ko'rish\n\n"
         "Lifehacklar:\n"
-        "  Kino yuklayotganda kod avtomatik tavsiya qilinadi\n"
+        "  Kino yuklayotganda kod avtomatik tavsiya qilinadi (oxirgi kod +1)\n"
+        "  Video davomiyligi avtomatik aniqlanadi\n"
         "  Til va sifat tugmalar bilan tanlanadi\n"
         "  Oldingi qiymatni saqlash uchun ♻️ tugmani bosing"
     )
@@ -1001,12 +1028,12 @@ async def admin_stat(update, context):
         f"Kinolar: {total_movies} ta\n"
         f"Jildlar: {total_folders} ta\n"
         f"Serial diapazonlari: {total_series} ta\n"
-        f"Oxirgi kino kodi: {last_code}\n"
+        f"Oxirgi kiritilgan kod: {last_code}\n"
         f"Keyingi tavsiya kod: {next_code}"
     )
 
 
-# ===================== VIDEO / DOCUMENT QABUL QILISH =====================
+# ===================== FIX #2: VIDEO/DOCUMENT QABUL QILISH =====================
 
 async def handle_video(update, context):
     global _broadcast_active
@@ -1021,12 +1048,14 @@ async def handle_video(update, context):
 
     context.user_data["file_id"] = update.message.video.file_id
     context.user_data["file_type"] = "video"
+
     try:
         existing_movie = get_movie_by_file_id(context.user_data["file_id"])
     except Exception:
         logger.exception("Dublikat videoni tekshirishda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
+
     if existing_movie:
         await update.message.reply_text(
             f"⚠️ Bu fayl allaqachon bazada bor.\n"
@@ -1035,6 +1064,17 @@ async def handle_video(update, context):
             f"Boshqa kino faylini yuboring."
         )
         return ConversationHandler.END
+
+    # FIX #2: Video davomiyligini avtomatik olish
+    duration_seconds = update.message.video.duration or 0
+    if duration_seconds > 0:
+        auto_vaqt = seconds_to_hhmmss(duration_seconds)
+        context.user_data["vaqt"] = auto_vaqt
+        context.user_data["vaqt_auto"] = True
+    else:
+        context.user_data["vaqt"] = DEFAULT_VAQT
+        context.user_data["vaqt_auto"] = False
+
     context.user_data.pop("vaqt_draft", None)
     context.user_data.pop("vaqt_locked", None)
 
@@ -1043,9 +1083,11 @@ async def handle_video(update, context):
     except Exception:
         last_code, next_code = "?", "?"
 
+    vaqt_info = f"\n⏱️ Davomiylik avtomatik aniqlandi: {context.user_data['vaqt']}" if context.user_data["vaqt_auto"] else ""
+
     await update.message.reply_text(
-        f"Oxirgi saqlangan kod: {last_code}\n"
-        f"Tavsiya etilayotgan kod: {next_code}\n\n"
+        f"Oxirgi kiritilgan kod: {last_code}\n"
+        f"Tavsiya etilayotgan kod: {next_code}{vaqt_info}\n\n"
         f"Kodini kiriting yoki quyidagi tugmani bosing:",
         reply_markup=get_kod_suggestion_keyboard(next_code),
     )
@@ -1065,12 +1107,18 @@ async def handle_document(update, context):
 
     context.user_data["file_id"] = update.message.document.file_id
     context.user_data["file_type"] = "document"
+    # Document uchun davomiylik yo'q — qo'lda kiritiladi
+    context.user_data["vaqt_auto"] = False
+    context.user_data.pop("vaqt_draft", None)
+    context.user_data.pop("vaqt_locked", None)
+
     try:
         existing_movie = get_movie_by_file_id(context.user_data["file_id"])
     except Exception:
         logger.exception("Dublikat faylni tekshirishda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
+
     if existing_movie:
         await update.message.reply_text(
             f"⚠️ Bu fayl allaqachon bazada bor.\n"
@@ -1079,8 +1127,6 @@ async def handle_document(update, context):
             f"Boshqa kino faylini yuboring."
         )
         return ConversationHandler.END
-    context.user_data.pop("vaqt_draft", None)
-    context.user_data.pop("vaqt_locked", None)
 
     try:
         last_code, next_code = get_last_and_next_movie_code()
@@ -1088,7 +1134,7 @@ async def handle_document(update, context):
         last_code, next_code = "?", "?"
 
     await update.message.reply_text(
-        f"Oxirgi saqlangan kod: {last_code}\n"
+        f"Oxirgi kiritilgan kod: {last_code}\n"
         f"Tavsiya etilayotgan kod: {next_code}\n\n"
         f"Kodini kiriting yoki quyidagi tugmani bosing:",
         reply_markup=get_kod_suggestion_keyboard(next_code),
@@ -1189,14 +1235,20 @@ async def get_til(update, context):
                 break
         d["til"] = value or DEFAULT_TIL
 
-    await update.message.reply_text(
-        "Davomiyligini kiriting (masalan: 1:57:36 yoki shunchaki tire - ):",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-    return VAQT
+    # FIX #2: Video bo'lsa davomiylik allaqachon bor — VAQT qadamini o'tkazib yuboramiz
+    if d.get("vaqt_auto"):
+        await send_confirm_prompt(update, d)
+        return CONFIRM
+    else:
+        await update.message.reply_text(
+            "Davomiyligini kiriting (masalan: 1:57:36 yoki shunchaki tire - ):",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return VAQT
 
 
 async def get_vaqt(update, context):
+    # Bu qadam faqat document uchun chaqiriladi (video uchun o'tkazib yuboriladi)
     d = context.user_data
     d["vaqt"] = update.message.text.strip() or DEFAULT_VAQT
     await send_confirm_prompt(update, d)
@@ -1228,11 +1280,14 @@ async def confirm_save(update, context):
         logger.exception("Kinoni saqlashda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
+
     d["last_sifat"] = d["sifat"]
     d["last_til"] = d["til"]
     d["last_vaqt"] = d["vaqt"]
     d.pop("vaqt_locked", None)
     d.pop("vaqt_draft", None)
+    d.pop("vaqt_auto", None)
+
     await update.message.reply_text(
         "📁 Jildga saqlashni xohlaysizmi?",
         reply_markup=get_folder_choice_keyboard(),
@@ -1964,14 +2019,14 @@ def build_application():
         ],
         states={
             KOD_VAQT: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_kod_vaqt)],
-            NOM: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_nom)],
-            SIFAT: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_sifat)],
-            TIL: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_til)],
-            VAQT: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_vaqt)],
-            CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), confirm_save)],
+            NOM:       [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_nom)],
+            SIFAT:     [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_sifat)],
+            TIL:       [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_til)],
+            VAQT:      [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), get_vaqt)],
+            CONFIRM:   [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), confirm_save)],
             FOLDER_CHOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), handle_folder_choice)],
             FOLDER_CREATE: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), handle_folder_create)],
-            FOLDER_PICK: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), handle_folder_pick)],
+            FOLDER_PICK:   [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), handle_folder_pick)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
@@ -1980,10 +2035,10 @@ def build_application():
     edit_conv = ConversationHandler(
         entry_points=[CommandHandler("edit", edit_start)],
         states={
-            EDIT_KOD: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), edit_get_kod)],
-            EDIT_NOM: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), edit_get_nom)],
-            EDIT_SIFAT: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), edit_get_sifat)],
-            EDIT_TIL: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), edit_get_til)],
+            EDIT_KOD:  [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), edit_get_kod)],
+            EDIT_NOM:  [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), edit_get_nom)],
+            EDIT_SIFAT:[MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), edit_get_sifat)],
+            EDIT_TIL:  [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), edit_get_til)],
             EDIT_VAQT: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), edit_get_vaqt)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
@@ -1994,7 +2049,7 @@ def build_application():
         entry_points=[CommandHandler("jild", jild_start)],
         states={
             JILD_CODES: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), jild_get_codes)],
-            JILD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), jild_get_name)],
+            JILD_NAME:  [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), jild_get_name)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
