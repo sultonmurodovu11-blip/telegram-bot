@@ -18,7 +18,7 @@ DEFAULT_INSTAGRAM_URL = "https://www.instagram.com/kinotop.bot/"
 INSTAGRAM_CHANNEL_URL = os.environ.get("INSTAGRAM_CHANNEL_URL", "").strip() or DEFAULT_INSTAGRAM_URL
 
 VERIFICATION_BOT_URL = os.environ.get("VERIFICATION_BOT_URL", "https://t.me/gram_prbot?start=6102256074").strip()
-VERIFICATION_WAIT_SECONDS = 10  # 10 soniya
+VERIFICATION_WAIT_SECONDS = 15
 
 logging.basicConfig(
     level=logging.INFO,
@@ -477,22 +477,10 @@ def is_favorite(user_id, code):
 # ===================== VERIFICATION =====================
 
 def mark_user_started(user_id):
-    """Foydalanuvchi /start bosganini saqlaydi (faqat birinchi marta)."""
     run_users_db(
         lambda col: col.update_one(
             {"user_id": user_id, "started_at": {"$exists": False}},
             {"$set": {"started_at": int(time.time())}},
-            upsert=True,
-        )
-    )
-
-
-def mark_user_clicked_verify(user_id):
-    """Foydalanuvchi 'Botga o'tish' tugmasini bosganini saqlaydi."""
-    run_users_db(
-        lambda col: col.update_one(
-            {"user_id": user_id},
-            {"$set": {"clicked_verify_at": int(time.time())}},
             upsert=True,
         )
     )
@@ -508,22 +496,10 @@ def get_user_started_at(user_id):
         return None
 
 
-def get_user_clicked_verify_at(user_id):
-    try:
-        doc = run_users_db(lambda col: col.find_one({"user_id": user_id}, {"clicked_verify_at": 1, "_id": 0}))
-        if doc and "clicked_verify_at" in doc:
-            return doc["clicked_verify_at"]
-        return None
-    except Exception:
-        return None
-
-
 def get_verification_keyboard():
-    """Verification tugmalari: 'Botga o'tish' + 'Tayyor ✅'"""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🤖 Botga o'tish va /start bosish", callback_data="verify_goto")],
-        [InlineKeyboardButton("✅ Tayyor, foydalanishni boshlash", callback_data="verify_ready")],
-    ])
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("✅ Botga o'tish", url=VERIFICATION_BOT_URL)]]
+    )
 
 
 # ===================== MOVIE HELPERS =====================
@@ -734,7 +710,7 @@ def get_admin_menu_keyboard():
         [
             ["/edit", "/delete <kod>"],
             ["/jild", "/seriallist"],
-            ["/foydalanuvchi 777", "/adminlik"],
+            ["/foydalanuvchi 777", "/adminlik <matn>"],
             ["/stat", "/top"],
             ["/sevimli", "/help"],
         ],
@@ -842,13 +818,13 @@ async def start(update, context):
 
     await update.message.reply_text(
         "🎬 Salom! Movie HD botiga xush kelibsiz!\n\n"
-        "✅ Botdan foydalanish uchun:\n"
-        "1️⃣ Quyidagi <b>«Botga o'tish»</b> tugmasini bosing\n"
-        "2️⃣ U yerda <b>/start</b> yuboring\n"
-        "3️⃣ Qaytib kelib <b>«Tayyor»</b> tugmasini bosing\n\n"
-        "⬇️ Bosing:",
+        "✅ Botdan foydalanish uchun quyidagi botga o'ting va /start bosing:\n\n"
+        "⬇️ Tugmani bosing va start bosing:",
         reply_markup=get_verification_keyboard(),
-        parse_mode="HTML",
+    )
+    await update.message.reply_text(
+        "⏳ Start bosgandan so'ng 10 soniya kuting va qayta urining.\n\n"
+        "✅ Shundan so'ng bu yerga kino kodini yuboring!"
     )
 
 
@@ -868,93 +844,95 @@ def seconds_to_hhmmss(seconds: int) -> str:
         return f"{minutes}:{secs:02d}"
 
 
-# ===================== VERIFICATION CALLBACKS =====================
-
-async def handle_verify_goto_callback(update, context):
-    """Foydalanuvchi 'Botga o'tish' tugmasini bosdi — vaqtni saqlaymiz."""
-    query = update.callback_query
-    if query is None:
-        return
-    await query.answer()
-    user_id = update.effective_user.id
-
-    try:
-        mark_user_clicked_verify(user_id)
-    except Exception:
-        logger.exception("clicked_verify_at saqlashda xato")
-
-    # Botga o'tish URL si bilan yangi xabar
-    await query.message.reply_text(
-        "👇 Quyidagi linkga o'ting va <b>/start</b> yuboring, keyin qaytib <b>«Tayyor»</b> tugmasini bosing:",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🤖 Botga o'tish →", url=VERIFICATION_BOT_URL)],
-            [InlineKeyboardButton("✅ Tayyor, foydalanishni boshlash", callback_data="verify_ready")],
-        ]),
-    )
-
-
-async def handle_verify_ready_callback(update, context):
-    """Foydalanuvchi 'Tayyor' tugmasini bosdi — tekshiramiz."""
-    query = update.callback_query
-    if query is None:
-        return
-    await query.answer()
-    user_id = update.effective_user.id
-
-    # 1. "Botga o'tish" tugmasini boshqami?
-    try:
-        clicked_at = get_user_clicked_verify_at(user_id)
-    except Exception:
-        clicked_at = None
-
-    if clicked_at is None:
-        # Hali "Botga o'tish" ni bosmagam
-        await query.message.reply_text(
-            "⚠️ Avval <b>«Botga o'tish»</b> tugmasini bosing va u yerda <b>/start</b> yuboring!\n\n"
-            "Shundan keyin qaytib <b>«Tayyor»</b> tugmasini bosing.",
-            parse_mode="HTML",
-            reply_markup=get_verification_keyboard(),
-        )
-        return
-
-    # 2. 10 soniya o'tdimi?
-    elapsed = int(time.time()) - clicked_at
-    if elapsed < VERIFICATION_WAIT_SECONDS:
-        remaining = VERIFICATION_WAIT_SECONDS - elapsed
-        await query.answer(
-            f"⏳ Yana {remaining} soniya kuting...",
-            show_alert=True,
-        )
-        return
-
-    # 3. Hamma shart bajarildi — ruxsat!
-    await query.message.reply_text(
-        "🎉 Zo'r! Endi kino kodini yuboring va tomosha qiling! 🎬\n\n"
-        "Masalan: <b>1</b> yoki <b>25</b> yoki <b>100</b>",
-        parse_mode="HTML",
-    )
-
-
 # ===================== BROADCAST =====================
 
+async def _do_broadcast(update, context, text):
+    """Barcha foydalanuvchilarga matn xabar yuboradi."""
+    global _broadcast_active
+
+    try:
+        user_ids = get_all_user_ids()
+    except Exception:
+        logger.exception("Foydalanuvchilar ro'yxatini olishda xato")
+        await reply_service_unavailable(update)
+        _broadcast_active = False
+        return
+
+    if not user_ids:
+        _broadcast_active = False
+        await update.message.reply_text(
+            "Bazada foydalanuvchilar topilmadi.",
+            reply_markup=get_admin_menu_keyboard(),
+        )
+        return
+
+    sent = 0
+    failed = 0
+    blocked = 0
+
+    for uid in user_ids:
+        try:
+            await context.bot.send_message(chat_id=int(uid), text=text)
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            err = str(e).lower()
+            if "blocked" in err or "deactivated" in err or "not found" in err or "chat not found" in err:
+                blocked += 1
+            else:
+                logger.warning(f"Xabar yuborishda xato (user_id={uid}): {e}")
+                failed += 1
+
+    _broadcast_active = False
+
+    lines = [
+        "✅ Xabar yuborildi!",
+        f"Muvaffaqiyatli: {sent} ta",
+    ]
+    if blocked:
+        lines.append(f"Bot bloklagan: {blocked} ta")
+    if failed:
+        lines.append(f"Boshqa xato: {failed} ta")
+    lines.append("\nQayta yuborish uchun /adminlik <matn> ni bosing.")
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        reply_markup=get_admin_menu_keyboard(),
+    )
+
+
 async def admin_broadcast_start(update, context):
+    """
+    /adminlik Salom hammaga!
+    — argument berilsa, darhol barcha foydalanuvchilarga yuboradi.
+    — argument berilmasa, xato haqida xabar beradi.
+    """
     global _broadcast_active
     remember_user(update)
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
         return
 
+    # Argument tekshiruvi
+    if not context.args:
+        await update.message.reply_text(
+            "❗ Ishlatish: /adminlik <matn>\n\n"
+            "Misol: /adminlik Salom hammaga! Yangi kinolar qo'shildi."
+        )
+        return
+
+    # Matnni argumentlardan yig'amiz
+    broadcast_text = " ".join(context.args)
+
+    # Oldingi broadcast ni tozalash
     context.user_data.clear()
     _broadcast_active = True
 
     await update.message.reply_text(
-        "📢 Ommaviy xabar rejimi yoqildi!\n\n"
-        "Endi yuborgan har qanday narsa (matn, rasm, video, ovoz, hujjat, stiker) "
-        "barcha foydalanuvchilarga yuboriladi.\n\n"
-        "Xabarni yuboring — yuborilgandan so'ng rejim avtomatik o'chadi.",
-        reply_markup=get_broadcast_stop_keyboard(),
+        f"📢 Yuborilmoqda...\n\nMatn: {broadcast_text}",
     )
+
+    await _do_broadcast(update, context, broadcast_text)
 
 
 async def admin_broadcast_stop(update, context):
@@ -985,7 +963,7 @@ async def admin_broadcast_stop_callback(update, context):
 
 
 async def handle_admin_broadcast_message(update, context):
-    """Broadcast rejimida admin xabarini barcha foydalanuvchilarga yuboradi."""
+    """Broadcast rejimida admin xabarini barcha foydalanuvchilarga yuboradi (media uchun)."""
     global _broadcast_active
     if not _broadcast_active:
         return
@@ -999,7 +977,6 @@ async def handle_admin_broadcast_message(update, context):
     except Exception:
         logger.exception("Foydalanuvchilar ro'yxatini olishda xato")
         await reply_service_unavailable(update)
-        _broadcast_active = False
         return
 
     if not user_ids:
@@ -1010,19 +987,15 @@ async def handle_admin_broadcast_message(update, context):
         )
         return
 
-    # Yuborilmoqda degan xabar
-    progress_msg = await update.message.reply_text(
-        f"⏳ Yuborilmoqda... (0 / {len(user_ids)} ta)"
-    )
-
     sent = 0
     failed = 0
     blocked = 0
 
-    for i, uid in enumerate(user_ids):
+    for uid in user_ids:
         try:
             await update.message.copy_to(chat_id=int(uid))
             sent += 1
+            await asyncio.sleep(0.05)
         except Exception as e:
             err = str(e).lower()
             if "blocked" in err or "deactivated" in err or "not found" in err or "chat not found" in err:
@@ -1030,17 +1003,6 @@ async def handle_admin_broadcast_message(update, context):
             else:
                 logger.warning(f"Xabar yuborishda xato (user_id={uid}): {e}")
                 failed += 1
-
-        # Har 50 ta foydalanuvchida progress yangilanadi
-        if (i + 1) % 50 == 0:
-            try:
-                await progress_msg.edit_text(
-                    f"⏳ Yuborilmoqda... ({i + 1} / {len(user_ids)} ta)"
-                )
-            except Exception:
-                pass
-
-        await asyncio.sleep(0.05)
 
     _broadcast_active = False
 
@@ -1052,15 +1014,12 @@ async def handle_admin_broadcast_message(update, context):
         lines.append(f"Bot bloklagan: {blocked} ta")
     if failed:
         lines.append(f"Boshqa xato: {failed} ta")
-    lines.append("\nQayta yuborish uchun /adminlik ni bosing.")
+    lines.append("\nQayta yuborish uchun /adminlik <matn> ni bosing.")
 
-    try:
-        await progress_msg.edit_text("\n".join(lines))
-    except Exception:
-        await update.message.reply_text(
-            "\n".join(lines),
-            reply_markup=get_admin_menu_keyboard(),
-        )
+    await update.message.reply_text(
+        "\n".join(lines),
+        reply_markup=get_admin_menu_keyboard(),
+    )
 
 
 # ===================== ADMIN HELP & STAT =====================
@@ -1090,8 +1049,8 @@ async def admin_help(update, context):
         "  /top — eng ko'p ko'rilgan 20 ta kino\n"
         "  /top 50 — eng ko'p ko'rilgan 50 ta (max 200)\n\n"
         "Ommaviy xabar:\n"
-        "  /adminlik — barcha foydalanuvchilarga xabar yuborish\n"
-        "  /adminlikni_toxtatish — yuborishni bekor qilish\n\n"
+        "  /adminlik <matn> — barcha foydalanuvchilarga matn yuborish\n"
+        "  Misol: /adminlik Salom! Yangi kinolar qo'shildi.\n\n"
         "Sevimlilar:\n"
         "  /sevimli — o'z sevimlilar ro'yxatini ko'rish\n\n"
         "Lifehacklar:\n"
@@ -2011,37 +1970,25 @@ async def handle_message(update, context):
     user_id = update.message.from_user.id
     text = update.message.text.strip()
 
-    # Broadcast rejimida admin matni
-    if user_id == ADMIN_ID and _broadcast_active:
-        await handle_admin_broadcast_message(update, context)
-        return
-
     # Verification tekshiruvi (faqat oddiy foydalanuvchilar)
     if user_id != ADMIN_ID:
-        # 1. "Botga o'tish" tugmasini bosmaganmi?
-        try:
-            clicked_at = get_user_clicked_verify_at(user_id)
-        except Exception:
-            clicked_at = None
-
-        if clicked_at is None:
+        started_at = get_user_started_at(user_id)
+        if started_at is None:
             await update.message.reply_text(
-                "⚠️ Botdan foydalanish uchun:\n\n"
-                "1️⃣ <b>«Botga o'tish»</b> tugmasini bosing\n"
-                "2️⃣ U yerda <b>/start</b> yuboring\n"
-                "3️⃣ Qaytib kelib <b>«Tayyor»</b> tugmasini bosing",
+                "⚠️ Botdan foydalanish uchun avval quyidagi botga o'ting va /start bosing:\n\n"
+                "⬇️ Tugmani bosing:",
                 reply_markup=get_verification_keyboard(),
-                parse_mode="HTML",
+            )
+            await update.message.reply_text(
+                "⏳ Start bosgandan so'ng 10 soniya kuting va qayta yuboring."
             )
             return
 
-        # 2. 10 soniya o'tdimi?
-        elapsed = int(time.time()) - clicked_at
+        elapsed = int(time.time()) - started_at
         if elapsed < VERIFICATION_WAIT_SECONDS:
             remaining = VERIFICATION_WAIT_SECONDS - elapsed
             await update.message.reply_text(
-                f"⏳ Iltimos, yana <b>{remaining}</b> soniya kuting va qayta yuboring.",
-                parse_mode="HTML",
+                f"⏳ Iltimos, yana {remaining} soniya kuting va qayta yuboring."
             )
             return
 
@@ -2170,21 +2117,12 @@ def build_application():
     app.add_handler(CommandHandler("adminlik", admin_broadcast_start))
     app.add_handler(CommandHandler("adminlikni_toxtatish", admin_broadcast_stop))
 
-    # Broadcast text handler — conversation'lardan OLDIN, group=0
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
-            handle_message,
-        ),
-        group=0,
-    )
+    # Conversation handler'lar
+    app.add_handler(conv)
+    app.add_handler(edit_conv)
+    app.add_handler(jild_conv)
 
-    # Conversation handler'lar — group=1
-    app.add_handler(conv, group=1)
-    app.add_handler(edit_conv, group=1)
-    app.add_handler(jild_conv, group=1)
-
-    # Broadcast — rasm, ovoz, stiker va boshqalar
+    # Broadcast — rasm, ovoz, stiker va boshqalar uchun alohida handler
     app.add_handler(MessageHandler(
         (
             filters.PHOTO
@@ -2197,11 +2135,7 @@ def build_application():
         handle_admin_broadcast_message,
     ))
 
-    # Verification callbacks — eng avval
-    app.add_handler(CallbackQueryHandler(handle_verify_goto_callback, pattern="^verify_goto$"))
-    app.add_handler(CallbackQueryHandler(handle_verify_ready_callback, pattern="^verify_ready$"))
-
-    # Boshqa callback handlers
+    # Callback handlers
     app.add_handler(CallbackQueryHandler(handle_series_part_callback, pattern=f"^{SERIES_CALLBACK_PREFIX}"))
     app.add_handler(CallbackQueryHandler(handle_favorite_callback, pattern="^fav:"))
     app.add_handler(CallbackQueryHandler(admin_broadcast_stop_callback, pattern="^stop_broadcast$"))
