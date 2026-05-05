@@ -897,12 +897,7 @@ async def admin_broadcast_start(update, context):
 
     await update.message.reply_text(
         "📢 Ommaviy xabar yozish\n\n"
-        "Yubormoqchi bo'lgan matnni kiriting.\n"
-        "Formatlash ishlaydi:\n"
-        "  *qalin matn*\n"
-        "  _kursiv matn_\n"
-        "  `kod`\n"
-        "  [Tugma nomi](https://link.com)\n\n"
+        "Yubormoqchi bo'lgan matnni kiriting.\n\n"
         "❌ Bekor qilish uchun /cancel",
         reply_markup=get_bc_cancel_keyboard(),
     )
@@ -1009,7 +1004,6 @@ async def _bc_show_preview(update, context):
     bc_url = d.get("bc_url")
     bc_btn_name = d.get("bc_btn_name")
 
-    # Preview xabarini quramiz
     preview_header = "👁 Ko'rinishi:\n─────────────────\n"
     preview_footer = "\n─────────────────"
     if bc_url and bc_btn_name:
@@ -1019,7 +1013,6 @@ async def _bc_show_preview(update, context):
     await update.message.reply_text(
         preview_header + bc_text + preview_footer,
         reply_markup=ReplyKeyboardRemove(),
-        parse_mode="Markdown",
     )
 
     confirm_markup = InlineKeyboardMarkup([
@@ -1096,7 +1089,6 @@ async def bc_confirm_callback(update, context):
                 chat_id=chat_id,
                 text=bc_text,
                 reply_markup=user_markup,
-                parse_mode="Markdown",
             )
             # Xabarni ro'yxatga qo'shish
             if ADMIN_ID not in _admin_sent_messages:
@@ -1139,7 +1131,6 @@ async def bc_confirm_callback(update, context):
                         chat_id=int(uid),
                         text=bc_text,
                         reply_markup=user_markup,
-                        parse_mode="Markdown",
                     )
                     sent += 1
                 except Exception as e:
