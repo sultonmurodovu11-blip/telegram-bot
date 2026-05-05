@@ -847,7 +847,7 @@ def seconds_to_hhmmss(seconds: int) -> str:
 # ===================== BROADCAST =====================
 
 async def _do_broadcast(update, context, text):
-    """Barcha foydalanuvchilarga matn xabar yuboradi."""
+    """Barcha foydalanuvchilarga matn xabar yuboradi — background'da, bot bloklanmaydi."""
     global _broadcast_active
 
     try:
@@ -866,54 +866,62 @@ async def _do_broadcast(update, context, text):
         )
         return
 
-    sent = 0
-    failed = 0
-    blocked = 0
-
-    for uid in user_ids:
-        try:
-            await context.bot.send_message(chat_id=int(uid), text=text)
-            sent += 1
-            await asyncio.sleep(0.05)
-        except Exception as e:
-            err = str(e).lower()
-            if "blocked" in err or "deactivated" in err or "not found" in err or "chat not found" in err:
-                blocked += 1
-            else:
-                logger.warning(f"Xabar yuborishda xato (user_id={uid}): {e}")
-                failed += 1
-
-    _broadcast_active = False
-
-    lines = [
-        "✅ Xabar yuborildi!",
-        f"Muvaffaqiyatli: {sent} ta",
-    ]
-    if blocked:
-        lines.append(f"Bot bloklagan: {blocked} ta")
-    if failed:
-        lines.append(f"Boshqa xato: {failed} ta")
-    lines.append("\nQayta yuborish uchun /adminlik <matn> ni bosing.")
-
+    total = len(user_ids)
+    taxminiy_daqiqa = round(total * 0.09 / 60)
     await update.message.reply_text(
-        "\n".join(lines),
+        f"📢 Yuborish boshlandi!\n"
+        f"Jami: {total} ta foydalanuvchi\n"
+        f"Taxminiy vaqt: ~{taxminiy_daqiqa} daqiqa\n\n"
+        f"✅ Bot ishlashda davom etadi — foydalanuvchilar kino so'rashi mumkin.",
         reply_markup=get_admin_menu_keyboard(),
     )
 
+    chat_id = update.effective_chat.id
+
+    async def do_send():
+        global _broadcast_active
+        sent = 0
+        failed = 0
+        blocked = 0
+
+        for uid in user_ids:
+            if not _broadcast_active:
+                break
+            try:
+                await context.bot.send_message(chat_id=int(uid), text=text)
+                sent += 1
+            except Exception as e:
+                err = str(e).lower()
+                if "blocked" in err or "deactivated" in err or "not found" in err or "chat not found" in err:
+                    blocked += 1
+                else:
+                    logger.warning(f"Xabar yuborishda xato (user_id={uid}): {e}")
+                    failed += 1
+            await asyncio.sleep(0.09)  # ~30 daqiqa uchun 20000 foydalanuvchiga
+
+        _broadcast_active = False
+
+        lines = ["✅ Broadcast tugadi!", f"Muvaffaqiyatli: {sent} ta"]
+        if blocked:
+            lines.append(f"Bot bloklagan: {blocked} ta")
+        if failed:
+            lines.append(f"Boshqa xato: {failed} ta")
+
+        try:
+            await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+        except Exception:
+            pass
+
+    asyncio.create_task(do_send())
+
 
 async def admin_broadcast_start(update, context):
-    """
-    /adminlik Salom hammaga!
-    — argument berilsa, darhol barcha foydalanuvchilarga yuboradi.
-    — argument berilmasa, xato haqida xabar beradi.
-    """
     global _broadcast_active
     remember_user(update)
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
         return
 
-    # Argument tekshiruvi
     if not context.args:
         await update.message.reply_text(
             "❗ Ishlatish: /adminlik <matn>\n\n"
@@ -921,16 +929,9 @@ async def admin_broadcast_start(update, context):
         )
         return
 
-    # Matnni argumentlardan yig'amiz
     broadcast_text = " ".join(context.args)
-
-    # Oldingi broadcast ni tozalash
     context.user_data.clear()
     _broadcast_active = True
-
-    await update.message.reply_text(
-        f"📢 Yuborilmoqda...\n\nMatn: {broadcast_text}",
-    )
 
     await _do_broadcast(update, context, broadcast_text)
 
@@ -942,7 +943,7 @@ async def admin_broadcast_stop(update, context):
         return
     _broadcast_active = False
     await update.message.reply_text(
-        "Ommaviy xabar rejimi to'xtatildi.",
+        "Ommaviy xabar to'xtatildi.",
         reply_markup=get_admin_menu_keyboard(),
     )
 
@@ -957,13 +958,13 @@ async def admin_broadcast_stop_callback(update, context):
         return
     _broadcast_active = False
     await query.message.reply_text(
-        "Ommaviy xabar rejimi to'xtatildi.",
+        "Ommaviy xabar to'xtatildi.",
         reply_markup=get_admin_menu_keyboard(),
     )
 
 
 async def handle_admin_broadcast_message(update, context):
-    """Broadcast rejimida admin xabarini barcha foydalanuvchilarga yuboradi (media uchun)."""
+    """Media xabarlarni background'da barcha foydalanuvchilarga yuboradi."""
     global _broadcast_active
     if not _broadcast_active:
         return
@@ -987,39 +988,54 @@ async def handle_admin_broadcast_message(update, context):
         )
         return
 
-    sent = 0
-    failed = 0
-    blocked = 0
-
-    for uid in user_ids:
-        try:
-            await update.message.copy_to(chat_id=int(uid))
-            sent += 1
-            await asyncio.sleep(0.05)
-        except Exception as e:
-            err = str(e).lower()
-            if "blocked" in err or "deactivated" in err or "not found" in err or "chat not found" in err:
-                blocked += 1
-            else:
-                logger.warning(f"Xabar yuborishda xato (user_id={uid}): {e}")
-                failed += 1
-
-    _broadcast_active = False
-
-    lines = [
-        "✅ Xabar yuborildi!",
-        f"Muvaffaqiyatli: {sent} ta",
-    ]
-    if blocked:
-        lines.append(f"Bot bloklagan: {blocked} ta")
-    if failed:
-        lines.append(f"Boshqa xato: {failed} ta")
-    lines.append("\nQayta yuborish uchun /adminlik <matn> ni bosing.")
-
+    total = len(user_ids)
+    taxminiy_daqiqa = round(total * 0.09 / 60)
     await update.message.reply_text(
-        "\n".join(lines),
+        f"📢 Yuborish boshlandi!\n"
+        f"Jami: {total} ta foydalanuvchi\n"
+        f"Taxminiy vaqt: ~{taxminiy_daqiqa} daqiqa\n\n"
+        f"✅ Bot ishlashda davom etadi — foydalanuvchilar kino so'rashi mumkin.",
         reply_markup=get_admin_menu_keyboard(),
     )
+
+    orig_message = update.message
+    chat_id = update.effective_chat.id
+
+    async def do_send():
+        global _broadcast_active
+        sent = 0
+        failed = 0
+        blocked = 0
+
+        for uid in user_ids:
+            if not _broadcast_active:
+                break
+            try:
+                await orig_message.copy_to(chat_id=int(uid))
+                sent += 1
+            except Exception as e:
+                err = str(e).lower()
+                if "blocked" in err or "deactivated" in err or "not found" in err or "chat not found" in err:
+                    blocked += 1
+                else:
+                    logger.warning(f"Xabar yuborishda xato (user_id={uid}): {e}")
+                    failed += 1
+            await asyncio.sleep(0.09)
+
+        _broadcast_active = False
+
+        lines = ["✅ Broadcast tugadi!", f"Muvaffaqiyatli: {sent} ta"]
+        if blocked:
+            lines.append(f"Bot bloklagan: {blocked} ta")
+        if failed:
+            lines.append(f"Boshqa xato: {failed} ta")
+
+        try:
+            await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+        except Exception:
+            pass
+
+    asyncio.create_task(do_send())
 
 
 # ===================== ADMIN HELP & STAT =====================
@@ -1970,7 +1986,6 @@ async def handle_message(update, context):
     user_id = update.message.from_user.id
     text = update.message.text.strip()
 
-    # Verification tekshiruvi (faqat oddiy foydalanuvchilar)
     if user_id != ADMIN_ID:
         started_at = get_user_started_at(user_id)
         if started_at is None:
@@ -2058,7 +2073,6 @@ def build_application():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_error_handler(log_error)
 
-    # Kino qo'shish conversation
     conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.VIDEO & filters.User(ADMIN_ID), handle_video),
@@ -2080,7 +2094,6 @@ def build_application():
         allow_reentry=True,
     )
 
-    # Tahrirlash conversation
     edit_conv = ConversationHandler(
         entry_points=[CommandHandler("edit", edit_start)],
         states={
@@ -2094,7 +2107,6 @@ def build_application():
         allow_reentry=True,
     )
 
-    # Jild yaratish conversation
     jild_conv = ConversationHandler(
         entry_points=[CommandHandler("jild", jild_start)],
         states={
@@ -2105,7 +2117,6 @@ def build_application():
         allow_reentry=True,
     )
 
-    # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("delete", delete_movie))
     app.add_handler(CommandHandler("foydalanuvchi", show_user_count))
@@ -2117,12 +2128,10 @@ def build_application():
     app.add_handler(CommandHandler("adminlik", admin_broadcast_start))
     app.add_handler(CommandHandler("adminlikni_toxtatish", admin_broadcast_stop))
 
-    # Conversation handler'lar
     app.add_handler(conv)
     app.add_handler(edit_conv)
     app.add_handler(jild_conv)
 
-    # Broadcast — rasm, ovoz, stiker va boshqalar uchun alohida handler
     app.add_handler(MessageHandler(
         (
             filters.PHOTO
@@ -2135,7 +2144,6 @@ def build_application():
         handle_admin_broadcast_message,
     ))
 
-    # Callback handlers
     app.add_handler(CallbackQueryHandler(handle_series_part_callback, pattern=f"^{SERIES_CALLBACK_PREFIX}"))
     app.add_handler(CallbackQueryHandler(handle_favorite_callback, pattern="^fav:"))
     app.add_handler(CallbackQueryHandler(admin_broadcast_stop_callback, pattern="^stop_broadcast$"))
