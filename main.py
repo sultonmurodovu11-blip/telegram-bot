@@ -106,6 +106,7 @@ DURATION_MAX_LENGTH = 10
 SERIES_CALLBACK_PREFIX = "series_part:"
 
 _broadcast_active = False
+_broadcast_status_message_id = None  # To'xtatish tugmasi yuborilgan xabar ID
 
 
 def reset_db_connection():
@@ -720,8 +721,9 @@ def get_admin_menu_keyboard():
 
 
 def get_broadcast_stop_keyboard():
+    """Broadcast jarayonida ko'rsatiladigan inline to'xtatish tugmasi."""
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Xabar yuborishni to'xtatish", callback_data="stop_broadcast")]]
+        [[InlineKeyboardButton("⛔ Yuborishni to'xtatish", callback_data="stop_broadcast")]]
     )
 
 
@@ -846,9 +848,25 @@ def seconds_to_hhmmss(seconds: int) -> str:
 
 # ===================== BROADCAST =====================
 
+async def _remove_broadcast_stop_button(bot, chat_id, message_id):
+    """To'xtatish tugmasini xabardan olib tashlaydi."""
+    global _broadcast_status_message_id
+    if message_id is None:
+        return
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=None,
+        )
+    except Exception:
+        pass
+    _broadcast_status_message_id = None
+
+
 async def _do_broadcast(update, context, text):
     """Barcha foydalanuvchilarga matn xabar yuboradi — background'da, bot bloklanmaydi."""
-    global _broadcast_active
+    global _broadcast_active, _broadcast_status_message_id
 
     try:
         user_ids = get_all_user_ids()
@@ -868,18 +886,21 @@ async def _do_broadcast(update, context, text):
 
     total = len(user_ids)
     taxminiy_daqiqa = round(total * 0.09 / 60)
-    await update.message.reply_text(
+
+    # Status xabarini to'xtatish tugmasi bilan yuborish
+    status_msg = await update.message.reply_text(
         f"📢 Yuborish boshlandi!\n"
         f"Jami: {total} ta foydalanuvchi\n"
         f"Taxminiy vaqt: ~{taxminiy_daqiqa} daqiqa\n\n"
         f"✅ Bot ishlashda davom etadi — foydalanuvchilar kino so'rashi mumkin.",
-        reply_markup=get_admin_menu_keyboard(),
+        reply_markup=get_broadcast_stop_keyboard(),
     )
+    _broadcast_status_message_id = status_msg.message_id
 
     chat_id = update.effective_chat.id
 
     async def do_send():
-        global _broadcast_active
+        global _broadcast_active, _broadcast_status_message_id
         sent = 0
         failed = 0
         blocked = 0
@@ -897,18 +918,31 @@ async def _do_broadcast(update, context, text):
                 else:
                     logger.warning(f"Xabar yuborishda xato (user_id={uid}): {e}")
                     failed += 1
-            await asyncio.sleep(0.09)  # ~30 daqiqa uchun 20000 foydalanuvchiga
+            await asyncio.sleep(0.09)
 
+        # To'xtatish tugmasini o'chirish
+        await _remove_broadcast_stop_button(context.bot, chat_id, _broadcast_status_message_id)
+
+        stopped_early = not _broadcast_active
         _broadcast_active = False
 
-        lines = ["✅ Broadcast tugadi!", f"Muvaffaqiyatli: {sent} ta"]
+        lines = []
+        if stopped_early:
+            lines.append("⛔ Broadcast to'xtatildi!")
+        else:
+            lines.append("✅ Broadcast tugadi!")
+        lines.append(f"Muvaffaqiyatli: {sent} ta")
         if blocked:
             lines.append(f"Bot bloklagan: {blocked} ta")
         if failed:
             lines.append(f"Boshqa xato: {failed} ta")
 
         try:
-            await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="\n".join(lines),
+                reply_markup=get_admin_menu_keyboard(),
+            )
         except Exception:
             pass
 
@@ -937,35 +971,49 @@ async def admin_broadcast_start(update, context):
 
 
 async def admin_broadcast_stop(update, context):
-    global _broadcast_active
+    global _broadcast_active, _broadcast_status_message_id
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
         return
     _broadcast_active = False
+    # Tugmani o'chirish
+    if _broadcast_status_message_id is not None:
+        await _remove_broadcast_stop_button(context.bot, update.effective_chat.id, _broadcast_status_message_id)
     await update.message.reply_text(
-        "Ommaviy xabar to'xtatildi.",
+        "⛔ Ommaviy xabar to'xtatildi.",
         reply_markup=get_admin_menu_keyboard(),
     )
 
 
 async def admin_broadcast_stop_callback(update, context):
-    global _broadcast_active
+    """Inline '⛔ Yuborishni to'xtatish' tugmasi bosilganda."""
+    global _broadcast_active, _broadcast_status_message_id
     query = update.callback_query
     if query is None:
         return
-    await query.answer()
+    await query.answer("⛔ To'xtatilmoqda...", show_alert=False)
+
     if update.effective_user.id != ADMIN_ID:
         return
+
     _broadcast_active = False
+
+    # Tugmani xabardan olib tashlash
+    try:
+        await query.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    _broadcast_status_message_id = None
+
     await query.message.reply_text(
-        "Ommaviy xabar to'xtatildi.",
+        "⛔ Ommaviy xabar to'xtatildi.",
         reply_markup=get_admin_menu_keyboard(),
     )
 
 
 async def handle_admin_broadcast_message(update, context):
     """Media xabarlarni background'da barcha foydalanuvchilarga yuboradi."""
-    global _broadcast_active
+    global _broadcast_active, _broadcast_status_message_id
     if not _broadcast_active:
         return
 
@@ -990,19 +1038,22 @@ async def handle_admin_broadcast_message(update, context):
 
     total = len(user_ids)
     taxminiy_daqiqa = round(total * 0.09 / 60)
-    await update.message.reply_text(
+
+    # Status xabarini to'xtatish tugmasi bilan yuborish
+    status_msg = await update.message.reply_text(
         f"📢 Yuborish boshlandi!\n"
         f"Jami: {total} ta foydalanuvchi\n"
         f"Taxminiy vaqt: ~{taxminiy_daqiqa} daqiqa\n\n"
         f"✅ Bot ishlashda davom etadi — foydalanuvchilar kino so'rashi mumkin.",
-        reply_markup=get_admin_menu_keyboard(),
+        reply_markup=get_broadcast_stop_keyboard(),
     )
+    _broadcast_status_message_id = status_msg.message_id
 
     orig_message = update.message
     chat_id = update.effective_chat.id
 
     async def do_send():
-        global _broadcast_active
+        global _broadcast_active, _broadcast_status_message_id
         sent = 0
         failed = 0
         blocked = 0
@@ -1022,16 +1073,29 @@ async def handle_admin_broadcast_message(update, context):
                     failed += 1
             await asyncio.sleep(0.09)
 
+        # To'xtatish tugmasini o'chirish
+        await _remove_broadcast_stop_button(context.bot, chat_id, _broadcast_status_message_id)
+
+        stopped_early = not _broadcast_active
         _broadcast_active = False
 
-        lines = ["✅ Broadcast tugadi!", f"Muvaffaqiyatli: {sent} ta"]
+        lines = []
+        if stopped_early:
+            lines.append("⛔ Broadcast to'xtatildi!")
+        else:
+            lines.append("✅ Broadcast tugadi!")
+        lines.append(f"Muvaffaqiyatli: {sent} ta")
         if blocked:
             lines.append(f"Bot bloklagan: {blocked} ta")
         if failed:
             lines.append(f"Boshqa xato: {failed} ta")
 
         try:
-            await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="\n".join(lines),
+                reply_markup=get_admin_menu_keyboard(),
+            )
         except Exception:
             pass
 
@@ -1066,7 +1130,8 @@ async def admin_help(update, context):
         "  /top 50 — eng ko'p ko'rilgan 50 ta (max 200)\n\n"
         "Ommaviy xabar:\n"
         "  /adminlik <matn> — barcha foydalanuvchilarga matn yuborish\n"
-        "  Misol: /adminlik Salom! Yangi kinolar qo'shildi.\n\n"
+        "  Misol: /adminlik Salom! Yangi kinolar qo'shildi.\n"
+        "  Yuborilayotganda '⛔ Yuborishni to'xtatish' tugmasi paydo bo'ladi\n\n"
         "Sevimlilar:\n"
         "  /sevimli — o'z sevimlilar ro'yxatini ko'rish\n\n"
         "Lifehacklar:\n"
