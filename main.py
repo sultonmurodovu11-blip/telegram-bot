@@ -786,6 +786,7 @@ async def send_confirm_prompt(update, data):
 KOD_VAQT, NOM, SIFAT, TIL, VAQT, CONFIRM, FOLDER_CHOICE, FOLDER_CREATE, FOLDER_PICK = range(9)
 EDIT_KOD, EDIT_NOM, EDIT_SIFAT, EDIT_TIL, EDIT_VAQT = range(9, 14)
 JILD_CODES, JILD_NAME = range(14, 16)
+BC_MESSAGE, BC_BUTTON, BC_CONFIRM = range(16, 19)
 
 
 async def log_error(update: object, context):
@@ -864,89 +865,7 @@ async def _remove_broadcast_stop_button(bot, chat_id, message_id):
     _broadcast_status_message_id = None
 
 
-async def _do_broadcast(update, context, text):
-    """Barcha foydalanuvchilarga matn xabar yuboradi — background'da, bot bloklanmaydi."""
-    global _broadcast_active, _broadcast_status_message_id
 
-    try:
-        user_ids = get_all_user_ids()
-    except Exception:
-        logger.exception("Foydalanuvchilar ro'yxatini olishda xato")
-        await reply_service_unavailable(update)
-        _broadcast_active = False
-        return
-
-    if not user_ids:
-        _broadcast_active = False
-        await update.message.reply_text(
-            "Bazada foydalanuvchilar topilmadi.",
-            reply_markup=get_admin_menu_keyboard(),
-        )
-        return
-
-    total = len(user_ids)
-    taxminiy_daqiqa = round(total * 0.09 / 60)
-
-    # Status xabarini to'xtatish tugmasi bilan yuborish
-    status_msg = await update.message.reply_text(
-        f"📢 Yuborish boshlandi!\n"
-        f"Jami: {total} ta foydalanuvchi\n"
-        f"Taxminiy vaqt: ~{taxminiy_daqiqa} daqiqa\n\n"
-        f"✅ Bot ishlashda davom etadi — foydalanuvchilar kino so'rashi mumkin.",
-        reply_markup=get_broadcast_stop_keyboard(),
-    )
-    _broadcast_status_message_id = status_msg.message_id
-
-    chat_id = update.effective_chat.id
-
-    async def do_send():
-        global _broadcast_active, _broadcast_status_message_id
-        sent = 0
-        failed = 0
-        blocked = 0
-
-        for uid in user_ids:
-            if not _broadcast_active:
-                break
-            try:
-                await context.bot.send_message(chat_id=int(uid), text=text)
-                sent += 1
-            except Exception as e:
-                err = str(e).lower()
-                if "blocked" in err or "deactivated" in err or "not found" in err or "chat not found" in err:
-                    blocked += 1
-                else:
-                    logger.warning(f"Xabar yuborishda xato (user_id={uid}): {e}")
-                    failed += 1
-            await asyncio.sleep(0.09)
-
-        # To'xtatish tugmasini o'chirish
-        await _remove_broadcast_stop_button(context.bot, chat_id, _broadcast_status_message_id)
-
-        stopped_early = not _broadcast_active
-        _broadcast_active = False
-
-        lines = []
-        if stopped_early:
-            lines.append("⛔ Broadcast to'xtatildi!")
-        else:
-            lines.append("✅ Broadcast tugadi!")
-        lines.append(f"Muvaffaqiyatli: {sent} ta")
-        if blocked:
-            lines.append(f"Bot bloklagan: {blocked} ta")
-        if failed:
-            lines.append(f"Boshqa xato: {failed} ta")
-
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="\n".join(lines),
-                reply_markup=get_admin_menu_keyboard(),
-            )
-        except Exception:
-            pass
-
-    asyncio.create_task(do_send())
 
 
 async def admin_broadcast_start(update, context):
@@ -956,18 +875,18 @@ async def admin_broadcast_start(update, context):
     if user_id != ADMIN_ID:
         return
 
-    if not context.args:
-        await update.message.reply_text(
-            "❗ Ishlatish: /adminlik <matn>\n\n"
-            "Misol: /adminlik Salom hammaga! Yangi kinolar qo'shildi."
-        )
+    if _broadcast_active:
+        await update.message.reply_text("⚠️ Broadcast allaqachon faol. Avval to'xtating.")
         return
 
-    broadcast_text = " ".join(context.args)
-    context.user_data.clear()
     _broadcast_active = True
-
-    await _do_broadcast(update, context, broadcast_text)
+    await update.message.reply_text(
+        "📢 Broadcast rejimi yoqildi!\n\n"
+        "Endi xabaringizni yuboring — rasm, video, matn, istalgan format.\n"
+        "Chiroyli formatlash (bold, italic, havolalar) to'liq saqlanadi.\n\n"
+        "❌ Bekor qilish uchun /cancel yozing.",
+        reply_markup=get_broadcast_stop_keyboard(),
+    )
 
 
 async def admin_broadcast_stop(update, context):
@@ -1012,7 +931,7 @@ async def admin_broadcast_stop_callback(update, context):
 
 
 async def handle_admin_broadcast_message(update, context):
-    """Media xabarlarni background'da barcha foydalanuvchilarga yuboradi."""
+    """Matn va media xabarlarni copy_to orqali barcha foydalanuvchilarga yuboradi."""
     global _broadcast_active, _broadcast_status_message_id
     if not _broadcast_active:
         return
@@ -1129,8 +1048,9 @@ async def admin_help(update, context):
         "  /top — eng ko'p ko'rilgan 20 ta kino\n"
         "  /top 50 — eng ko'p ko'rilgan 50 ta (max 200)\n\n"
         "Ommaviy xabar:\n"
-        "  /adminlik <matn> — barcha foydalanuvchilarga matn yuborish\n"
-        "  Misol: /adminlik Salom! Yangi kinolar qo'shildi.\n"
+        "  /adminlik — broadcast rejimini yoqish\n"
+        "  Keyin xabaringizni yuboring (matn, rasm, video — istalgan)\n"
+        "  Chiroyli matn formatlash (bold, italic, havolalar) to'liq saqlanadi\n"
         "  Yuborilayotganda '⛔ Yuborishni to'xtatish' tugmasi paydo bo'ladi\n\n"
         "Sevimlilar:\n"
         "  /sevimli — o'z sevimlilar ro'yxatini ko'rish\n\n"
@@ -2050,6 +1970,11 @@ async def handle_message(update, context):
     remember_user(update)
     user_id = update.message.from_user.id
     text = update.message.text.strip()
+
+    # Admin matn xabarini broadcast rejimida copy_to bilan yuborish
+    if user_id == ADMIN_ID and _broadcast_active:
+        await handle_admin_broadcast_message(update, context)
+        return
 
     if user_id != ADMIN_ID:
         started_at = get_user_started_at(user_id)
