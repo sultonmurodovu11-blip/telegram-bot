@@ -106,7 +106,9 @@ DURATION_MAX_LENGTH = 10
 SERIES_CALLBACK_PREFIX = "series_part:"
 
 _broadcast_active = False
-_broadcast_status_message_id = None  # To'xtatish tugmasi yuborilgan xabar ID
+_broadcast_status_message_id = None
+# Admin yuborgan broadcast xabarlarini saqlaymiz (o'chirish uchun)
+_admin_sent_messages = {}  # {ADMIN_ID: [{"msg_id": int, "chat_id": int, "preview": str}]}
 
 
 def reset_db_connection():
@@ -711,9 +713,10 @@ def get_admin_menu_keyboard():
         [
             ["/edit", "/delete <kod>"],
             ["/jild", "/seriallist"],
-            ["/foydalanuvchi 777", "/adminlik <matn>"],
-            ["/stat", "/top"],
-            ["/sevimli", "/help"],
+            ["/foydalanuvchi 777", "/adminlik"],
+            ["/ochirish", "/stat"],
+            ["/top", "/sevimli"],
+            ["/help"],
         ],
         resize_keyboard=True,
         one_time_keyboard=False,
@@ -721,9 +724,24 @@ def get_admin_menu_keyboard():
 
 
 def get_broadcast_stop_keyboard():
-    """Broadcast jarayonida ko'rsatiladigan inline to'xtatish tugmasi."""
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("⛔ Yuborishni to'xtatish", callback_data="stop_broadcast")]]
+    )
+
+
+def get_bc_ask_button_keyboard():
+    return ReplyKeyboardMarkup(
+        [["✅ Ha, tugma qo'shish", "❌ Yo'q, shunchaki yuborish"]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def get_bc_cancel_keyboard():
+    return ReplyKeyboardMarkup(
+        [["❌ Bekor qilish"]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
     )
 
 
@@ -783,10 +801,12 @@ async def send_confirm_prompt(update, data):
     )
 
 
+# State raqamlari
 KOD_VAQT, NOM, SIFAT, TIL, VAQT, CONFIRM, FOLDER_CHOICE, FOLDER_CREATE, FOLDER_PICK = range(9)
 EDIT_KOD, EDIT_NOM, EDIT_SIFAT, EDIT_TIL, EDIT_VAQT = range(9, 14)
 JILD_CODES, JILD_NAME = range(14, 16)
-BC_MESSAGE, BC_BUTTON, BC_CONFIRM = range(16, 19)
+# Broadcast states
+BC_GET_TEXT, BC_ASK_BUTTON, BC_GET_URL, BC_GET_BTN_NAME, BC_CONFIRM = range(16, 21)
 
 
 async def log_error(update: object, context):
@@ -850,7 +870,6 @@ def seconds_to_hhmmss(seconds: int) -> str:
 # ===================== BROADCAST =====================
 
 async def _remove_broadcast_stop_button(bot, chat_id, message_id):
-    """To'xtatish tugmasini xabardan olib tashlaydi."""
     global _broadcast_status_message_id
     if message_id is None:
         return
@@ -865,47 +884,301 @@ async def _remove_broadcast_stop_button(bot, chat_id, message_id):
     _broadcast_status_message_id = None
 
 
-
-
-
 async def admin_broadcast_start(update, context):
-    global _broadcast_active
+    """Broadcast conversation boshlaydi — matn so'raydi"""
     remember_user(update)
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
-        return
+        return ConversationHandler.END
 
     if _broadcast_active:
-        await update.message.reply_text("⚠️ Broadcast allaqachon faol. Avval to'xtating.")
-        return
+        await update.message.reply_text("⚠️ Hozir yuborish jarayoni faol. Kuting yoki /cancel bosing.")
+        return ConversationHandler.END
 
-    _broadcast_active = True
     await update.message.reply_text(
-        "📢 Broadcast rejimi yoqildi!\n\n"
-        "Endi xabaringizni yuboring — rasm, video, matn, istalgan format.\n"
-        "Chiroyli formatlash (bold, italic, havolalar) to'liq saqlanadi.\n\n"
-        "❌ Bekor qilish uchun /cancel yozing.",
-        reply_markup=get_broadcast_stop_keyboard(),
+        "📢 Ommaviy xabar yozish\n\n"
+        "Yubormoqchi bo'lgan matnni kiriting.\n"
+        "Formatlash ishlaydi:\n"
+        "  *qalin matn*\n"
+        "  _kursiv matn_\n"
+        "  `kod`\n"
+        "  [Tugma nomi](https://link.com)\n\n"
+        "❌ Bekor qilish uchun /cancel",
+        reply_markup=get_bc_cancel_keyboard(),
+    )
+    return BC_GET_TEXT
+
+
+async def bc_get_text(update, context):
+    """Admin yozgan matnni oladi"""
+    text = update.message.text.strip()
+
+    if text in ("❌ Bekor qilish", "/cancel"):
+        await update.message.reply_text("❌ Bekor qilindi.", reply_markup=get_admin_menu_keyboard())
+        return ConversationHandler.END
+
+    if not text:
+        await update.message.reply_text("Matn bo'sh bo'lmasin. Qayta yuboring:")
+        return BC_GET_TEXT
+
+    context.user_data["bc_text"] = text
+
+    await update.message.reply_text(
+        "🔗 Xabarga inline tugma qo'shmoqchimisiz?\n\n"
+        "Tugma bosilganda foydalanuvchi siz bergan linkka o'tadi.",
+        reply_markup=get_bc_ask_button_keyboard(),
+    )
+    return BC_ASK_BUTTON
+
+
+async def bc_ask_button(update, context):
+    """Tugma kerakmi yo'qmi"""
+    choice = update.message.text.strip()
+
+    if choice in ("❌ Bekor qilish", "/cancel"):
+        await update.message.reply_text("❌ Bekor qilindi.", reply_markup=get_admin_menu_keyboard())
+        return ConversationHandler.END
+
+    if choice == "✅ Ha, tugma qo'shish":
+        await update.message.reply_text(
+            "🌐 Tugma URL manzilini yuboring:\n\n"
+            "Misol: https://t.me/kanalim\n"
+            "yoki: https://example.com",
+            reply_markup=get_bc_cancel_keyboard(),
+        )
+        return BC_GET_URL
+
+    if choice == "❌ Yo'q, shunchaki yuborish":
+        context.user_data["bc_url"] = None
+        context.user_data["bc_btn_name"] = None
+        return await _bc_show_preview(update, context)
+
+    await update.message.reply_text(
+        "Tugmalardan birini tanlang.",
+        reply_markup=get_bc_ask_button_keyboard(),
+    )
+    return BC_ASK_BUTTON
+
+
+async def bc_get_url(update, context):
+    """URL manzilini oladi"""
+    url = update.message.text.strip()
+
+    if url in ("❌ Bekor qilish", "/cancel"):
+        await update.message.reply_text("❌ Bekor qilindi.", reply_markup=get_admin_menu_keyboard())
+        return ConversationHandler.END
+
+    if not (url.startswith("http://") or url.startswith("https://") or url.startswith("tg://")):
+        await update.message.reply_text(
+            "⚠️ URL noto'g'ri formatda.\n\n"
+            "https:// yoki http:// bilan boshlang.\n"
+            "Misol: https://t.me/kanalim",
+            reply_markup=get_bc_cancel_keyboard(),
+        )
+        return BC_GET_URL
+
+    context.user_data["bc_url"] = url
+    await update.message.reply_text(
+        "✏️ Tugma ustida ko'rinadigan matnni yuboring:\n\n"
+        "Misol: 📢 Kanalga o'tish",
+        reply_markup=get_bc_cancel_keyboard(),
+    )
+    return BC_GET_BTN_NAME
+
+
+async def bc_get_btn_name(update, context):
+    """Tugma nomini oladi"""
+    btn_name = update.message.text.strip()
+
+    if btn_name in ("❌ Bekor qilish", "/cancel"):
+        await update.message.reply_text("❌ Bekor qilindi.", reply_markup=get_admin_menu_keyboard())
+        return ConversationHandler.END
+
+    if not btn_name:
+        await update.message.reply_text("Tugma nomi bo'sh bo'lmasin. Qayta yuboring:")
+        return BC_GET_BTN_NAME
+
+    context.user_data["bc_btn_name"] = btn_name
+    return await _bc_show_preview(update, context)
+
+
+async def _bc_show_preview(update, context):
+    """Preview ko'rsatadi va tasdiqlash so'raydi"""
+    d = context.user_data
+    bc_text = d.get("bc_text", "")
+    bc_url = d.get("bc_url")
+    bc_btn_name = d.get("bc_btn_name")
+
+    # Preview xabarini quramiz
+    preview_header = "👁 Ko'rinishi:\n─────────────────\n"
+    preview_footer = "\n─────────────────"
+    if bc_url and bc_btn_name:
+        preview_footer += f"\n[ {bc_btn_name} ]"
+    preview_footer += "\n─────────────────\n\nYuborishni tasdiqlaysizmi?"
+
+    await update.message.reply_text(
+        preview_header + bc_text + preview_footer,
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode="Markdown",
     )
 
+    confirm_markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Yuborish", callback_data="bc_yes"),
+            InlineKeyboardButton("✏️ Qayta", callback_data="bc_edit"),
+            InlineKeyboardButton("❌ Bekor", callback_data="bc_cancel"),
+        ]
+    ])
+    await update.message.reply_text("Tanlov:", reply_markup=confirm_markup)
+    return BC_CONFIRM
 
-async def admin_broadcast_stop(update, context):
-    global _broadcast_active, _broadcast_status_message_id
-    user_id = update.message.from_user.id
-    if user_id != ADMIN_ID:
+
+async def bc_confirm_callback(update, context):
+    """Tasdiqlash inline tugmalari"""
+    global _broadcast_active, _broadcast_status_message_id, _admin_sent_messages
+    query = update.callback_query
+    if query is None:
         return
-    _broadcast_active = False
-    # Tugmani o'chirish
-    if _broadcast_status_message_id is not None:
-        await _remove_broadcast_stop_button(context.bot, update.effective_chat.id, _broadcast_status_message_id)
-    await update.message.reply_text(
-        "⛔ Ommaviy xabar to'xtatildi.",
-        reply_markup=get_admin_menu_keyboard(),
-    )
+    await query.answer()
+
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    if query.data == "bc_cancel":
+        await query.message.edit_reply_markup(reply_markup=None)
+        await query.message.reply_text("❌ Bekor qilindi.", reply_markup=get_admin_menu_keyboard())
+        return ConversationHandler.END
+
+    if query.data == "bc_edit":
+        await query.message.edit_reply_markup(reply_markup=None)
+        await query.message.reply_text(
+            "Yangi matnni yuboring:",
+            reply_markup=get_bc_cancel_keyboard(),
+        )
+        return BC_GET_TEXT
+
+    if query.data == "bc_yes":
+        await query.message.edit_reply_markup(reply_markup=None)
+
+        d = context.user_data
+        bc_text = d.get("bc_text", "")
+        bc_url = d.get("bc_url")
+        bc_btn_name = d.get("bc_btn_name")
+
+        # Foydalanuvchilarga boriydigan inline markup
+        user_markup = None
+        if bc_url and bc_btn_name:
+            user_markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton(bc_btn_name, url=bc_url)]
+            ])
+
+        try:
+            user_ids = get_all_user_ids()
+        except Exception:
+            logger.exception("Foydalanuvchilar ro'yxatini olishda xato")
+            await query.message.reply_text(SERVICE_UNAVAILABLE_TEXT)
+            return ConversationHandler.END
+
+        if not user_ids:
+            await query.message.reply_text(
+                "Bazada foydalanuvchilar topilmadi.",
+                reply_markup=get_admin_menu_keyboard(),
+            )
+            return ConversationHandler.END
+
+        total = len(user_ids)
+        taxminiy = round(total * 0.09 / 60)
+        chat_id = update.effective_chat.id
+
+        # Adminga preview sifatida xabarni yuborish (o'chirish uchun saqlaymiz)
+        try:
+            preview_msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=bc_text,
+                reply_markup=user_markup,
+                parse_mode="Markdown",
+            )
+            # Xabarni ro'yxatga qo'shish
+            if ADMIN_ID not in _admin_sent_messages:
+                _admin_sent_messages[ADMIN_ID] = []
+            short_preview = bc_text[:50].replace("\n", " ")
+            _admin_sent_messages[ADMIN_ID].append({
+                "msg_id": preview_msg.message_id,
+                "chat_id": chat_id,
+                "preview": short_preview,
+            })
+        except Exception:
+            logger.exception("Admin preview xabarini yuborishda xato")
+
+        status_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"📢 Yuborish boshlandi!\n"
+                f"Jami: {total} ta foydalanuvchi\n"
+                f"Taxminiy vaqt: ~{taxminiy} daqiqa\n\n"
+                f"✅ Bot ishlashda davom etadi."
+            ),
+            reply_markup=get_broadcast_stop_keyboard(),
+        )
+        _broadcast_status_message_id = status_msg.message_id
+        _broadcast_active = True
+
+        bot = context.bot
+
+        async def do_send():
+            global _broadcast_active, _broadcast_status_message_id
+            sent = 0
+            failed = 0
+            blocked = 0
+
+            for uid in user_ids:
+                if not _broadcast_active:
+                    break
+                try:
+                    await bot.send_message(
+                        chat_id=int(uid),
+                        text=bc_text,
+                        reply_markup=user_markup,
+                        parse_mode="Markdown",
+                    )
+                    sent += 1
+                except Exception as e:
+                    err = str(e).lower()
+                    if any(k in err for k in ["blocked", "deactivated", "not found", "chat not found"]):
+                        blocked += 1
+                    else:
+                        logger.warning(f"Xabar yuborishda xato (user_id={uid}): {e}")
+                        failed += 1
+                await asyncio.sleep(0.09)
+
+            await _remove_broadcast_stop_button(bot, chat_id, _broadcast_status_message_id)
+            stopped_early = not _broadcast_active
+            _broadcast_active = False
+
+            lines = ["⛔ Broadcast to'xtatildi!" if stopped_early else "✅ Broadcast tugadi!"]
+            lines.append(f"Muvaffaqiyatli: {sent} ta")
+            if blocked:
+                lines.append(f"Bot bloklagan: {blocked} ta")
+            if failed:
+                lines.append(f"Boshqa xato: {failed} ta")
+
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="\n".join(lines),
+                    reply_markup=get_admin_menu_keyboard(),
+                )
+            except Exception:
+                pass
+
+        asyncio.create_task(do_send())
+        return ConversationHandler.END
+
+    return BC_CONFIRM
 
 
 async def admin_broadcast_stop_callback(update, context):
-    """Inline '⛔ Yuborishni to'xtatish' tugmasi bosilganda."""
+    """⛔ Yuborishni to'xtatish inline tugmasi"""
     global _broadcast_active, _broadcast_status_message_id
     query = update.callback_query
     if query is None:
@@ -917,7 +1190,6 @@ async def admin_broadcast_stop_callback(update, context):
 
     _broadcast_active = False
 
-    # Tugmani xabardan olib tashlash
     try:
         await query.message.edit_reply_markup(reply_markup=None)
     except Exception:
@@ -930,95 +1202,107 @@ async def admin_broadcast_stop_callback(update, context):
     )
 
 
-async def handle_admin_broadcast_message(update, context):
-    """Matn va media xabarlarni copy_to orqali barcha foydalanuvchilarga yuboradi."""
-    global _broadcast_active, _broadcast_status_message_id
-    if not _broadcast_active:
-        return
+# ===================== O'CHIRISH =====================
 
+async def admin_delete_menu(update, context):
+    """Admin o'z yuborgan broadcast xabarlarini o'chiradi"""
+    global _admin_sent_messages
+    remember_user(update)
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
         return
 
-    try:
-        user_ids = get_all_user_ids()
-    except Exception:
-        logger.exception("Foydalanuvchilar ro'yxatini olishda xato")
-        await reply_service_unavailable(update)
-        return
-
-    if not user_ids:
-        _broadcast_active = False
+    msgs = _admin_sent_messages.get(ADMIN_ID, [])
+    if not msgs:
         await update.message.reply_text(
-            "Bazada foydalanuvchilar topilmadi.",
+            "📭 O'chiriladigan xabar yo'q.\n\n"
+            "Faqat /adminlik orqali yuborilgan xabarlar ko'rinadi.\n"
+            "(Bot qayta ishga tushsa ro'yxat tozalanadi)",
             reply_markup=get_admin_menu_keyboard(),
         )
         return
 
-    total = len(user_ids)
-    taxminiy_daqiqa = round(total * 0.09 / 60)
+    lines = ["🗑 Qaysi xabarni o'chirasiz?\n"]
+    for i, m in enumerate(msgs, start=1):
+        lines.append(f"{i}. {m['preview']}...")
 
-    # Status xabarini to'xtatish tugmasi bilan yuborish
-    status_msg = await update.message.reply_text(
-        f"📢 Yuborish boshlandi!\n"
-        f"Jami: {total} ta foydalanuvchi\n"
-        f"Taxminiy vaqt: ~{taxminiy_daqiqa} daqiqa\n\n"
-        f"✅ Bot ishlashda davom etadi — foydalanuvchilar kino so'rashi mumkin.",
-        reply_markup=get_broadcast_stop_keyboard(),
+    buttons = []
+    for i, m in enumerate(msgs):
+        buttons.append([InlineKeyboardButton(
+            f"{i+1}. {m['preview'][:25]}...",
+            callback_data=f"del_bc:{i}"
+        )])
+    buttons.append([InlineKeyboardButton("🧹 Barchasini o'chirish", callback_data="del_bc:all")])
+    buttons.append([InlineKeyboardButton("❌ Bekor", callback_data="del_bc:cancel")])
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
-    _broadcast_status_message_id = status_msg.message_id
 
-    orig_message = update.message
-    chat_id = update.effective_chat.id
 
-    async def do_send():
-        global _broadcast_active, _broadcast_status_message_id
-        sent = 0
-        failed = 0
-        blocked = 0
+async def admin_delete_bc_callback(update, context):
+    """O'chirish callback handler"""
+    global _admin_sent_messages
+    query = update.callback_query
+    await query.answer()
 
-        for uid in user_ids:
-            if not _broadcast_active:
-                break
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    msgs = _admin_sent_messages.get(ADMIN_ID, [])
+    action = query.data.split(":", 1)[1]  # "0", "all", "cancel"
+
+    if action == "cancel":
+        await query.message.edit_reply_markup(reply_markup=None)
+        return
+
+    if action == "all":
+        deleted = 0
+        for m in msgs:
             try:
-                await orig_message.copy_to(chat_id=int(uid))
-                sent += 1
+                await context.bot.delete_message(
+                    chat_id=m["chat_id"],
+                    message_id=m["msg_id"],
+                )
+                deleted += 1
             except Exception as e:
-                err = str(e).lower()
-                if "blocked" in err or "deactivated" in err or "not found" in err or "chat not found" in err:
-                    blocked += 1
-                else:
-                    logger.warning(f"Xabar yuborishda xato (user_id={uid}): {e}")
-                    failed += 1
-            await asyncio.sleep(0.09)
+                logger.warning(f"Xabarni o'chirishda xato: {e}")
+        _admin_sent_messages[ADMIN_ID] = []
+        await query.message.edit_reply_markup(reply_markup=None)
+        await query.message.reply_text(
+            f"🗑 {deleted} ta xabar o'chirildi.",
+            reply_markup=get_admin_menu_keyboard(),
+        )
+        return
 
-        # To'xtatish tugmasini o'chirish
-        await _remove_broadcast_stop_button(context.bot, chat_id, _broadcast_status_message_id)
+    try:
+        idx = int(action)
+    except ValueError:
+        return
 
-        stopped_early = not _broadcast_active
-        _broadcast_active = False
-
-        lines = []
-        if stopped_early:
-            lines.append("⛔ Broadcast to'xtatildi!")
-        else:
-            lines.append("✅ Broadcast tugadi!")
-        lines.append(f"Muvaffaqiyatli: {sent} ta")
-        if blocked:
-            lines.append(f"Bot bloklagan: {blocked} ta")
-        if failed:
-            lines.append(f"Boshqa xato: {failed} ta")
-
+    if 0 <= idx < len(msgs):
+        m = msgs[idx]
         try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="\n".join(lines),
+            await context.bot.delete_message(
+                chat_id=m["chat_id"],
+                message_id=m["msg_id"],
+            )
+            _admin_sent_messages[ADMIN_ID].pop(idx)
+            await query.message.edit_reply_markup(reply_markup=None)
+            await query.message.reply_text(
+                f"✅ Xabar o'chirildi.",
                 reply_markup=get_admin_menu_keyboard(),
             )
-        except Exception:
-            pass
-
-    asyncio.create_task(do_send())
+        except Exception as e:
+            await query.message.edit_reply_markup(reply_markup=None)
+            await query.message.reply_text(
+                f"⚠️ O'chirishda xato: {e}\n"
+                "(Xabar juda eski bo'lishi mumkin — Telegram 48 soatdan eski xabarlarni o'chirishga ruxsat bermaydi)",
+                reply_markup=get_admin_menu_keyboard(),
+            )
+    else:
+        await query.message.edit_reply_markup(reply_markup=None)
 
 
 # ===================== ADMIN HELP & STAT =====================
@@ -1032,8 +1316,7 @@ async def admin_help(update, context):
     help_text = (
         "Admin buyruqlari:\n\n"
         "Kino qo'shish:\n"
-        "  Video yoki fayl yuboring — kod, nom, sifat, til so'raladi\n"
-        "  (Video uchun davomiylik avtomatik aniqlanadi)\n\n"
+        "  Video yoki fayl yuboring — kod, nom, sifat, til so'raladi\n\n"
         "Tahrirlash:\n"
         "  /edit — kino ma'lumotlarini yangilash\n\n"
         "O'chirish:\n"
@@ -1045,20 +1328,12 @@ async def admin_help(update, context):
         "Statistika:\n"
         "  /foydalanuvchi 777 — foydalanuvchilar soni\n"
         "  /stat — bot statistikasi\n"
-        "  /top — eng ko'p ko'rilgan 20 ta kino\n"
-        "  /top 50 — eng ko'p ko'rilgan 50 ta (max 200)\n\n"
+        "  /top — eng ko'p ko'rilgan 20 ta kino\n\n"
         "Ommaviy xabar:\n"
-        "  /adminlik — broadcast rejimini yoqish\n"
-        "  Keyin xabaringizni yuboring (matn, rasm, video — istalgan)\n"
-        "  Chiroyli matn formatlash (bold, italic, havolalar) to'liq saqlanadi\n"
-        "  Yuborilayotganda '⛔ Yuborishni to'xtatish' tugmasi paydo bo'ladi\n\n"
+        "  /adminlik — matn yozish, tugma qo'shish, yuborish\n"
+        "  /ochirish — yuborilgan xabarlarni o'chirish\n\n"
         "Sevimlilar:\n"
-        "  /sevimli — o'z sevimlilar ro'yxatini ko'rish\n\n"
-        "Lifehacklar:\n"
-        "  Kino yuklayotganda kod avtomatik tavsiya qilinadi (oxirgi kod +1)\n"
-        "  Video davomiyligi avtomatik aniqlanadi\n"
-        "  Til va sifat tugmalar bilan tanlanadi\n"
-        "  Oldingi qiymatni saqlash uchun ♻️ tugmani bosing"
+        "  /sevimli — o'z sevimlilar ro'yxatini ko'rish"
     )
 
     await update.message.reply_text(help_text, reply_markup=get_admin_menu_keyboard())
@@ -1095,13 +1370,8 @@ async def admin_stat(update, context):
 # ===================== VIDEO/DOCUMENT QABUL QILISH =====================
 
 async def handle_video(update, context):
-    global _broadcast_active
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
-        return
-
-    if _broadcast_active:
-        await handle_admin_broadcast_message(update, context)
         return
 
     context.user_data["file_id"] = update.message.video.file_id
@@ -1152,13 +1422,8 @@ async def handle_video(update, context):
 
 
 async def handle_document(update, context):
-    global _broadcast_active
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
-        return
-
-    if _broadcast_active:
-        await handle_admin_broadcast_message(update, context)
         return
 
     context.user_data["file_id"] = update.message.document.file_id
@@ -1599,10 +1864,7 @@ async def jild_get_name(update, context):
 
 
 async def cancel(update, context):
-    global _broadcast_active
-    context.user_data.pop("jild_codes", None)
-    _broadcast_active = False
-    await update.message.reply_text("❌ Bekor qilindi.", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("❌ Bekor qilindi.", reply_markup=get_admin_menu_keyboard())
     return ConversationHandler.END
 
 
@@ -1971,11 +2233,6 @@ async def handle_message(update, context):
     user_id = update.message.from_user.id
     text = update.message.text.strip()
 
-    # Admin matn xabarini broadcast rejimida copy_to bilan yuborish
-    if user_id == ADMIN_ID and _broadcast_active:
-        await handle_admin_broadcast_message(update, context)
-        return
-
     if user_id != ADMIN_ID:
         started_at = get_user_started_at(user_id)
         if started_at is None:
@@ -2063,6 +2320,7 @@ def build_application():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_error_handler(log_error)
 
+    # Kino qo'shish conversation
     conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.VIDEO & filters.User(ADMIN_ID), handle_video),
@@ -2084,6 +2342,7 @@ def build_application():
         allow_reentry=True,
     )
 
+    # Tahrirlash conversation
     edit_conv = ConversationHandler(
         entry_points=[CommandHandler("edit", edit_start)],
         states={
@@ -2097,6 +2356,7 @@ def build_application():
         allow_reentry=True,
     )
 
+    # Jild conversation
     jild_conv = ConversationHandler(
         entry_points=[CommandHandler("jild", jild_start)],
         states={
@@ -2107,6 +2367,21 @@ def build_application():
         allow_reentry=True,
     )
 
+    # Broadcast conversation
+    broadcast_conv = ConversationHandler(
+        entry_points=[CommandHandler("adminlik", admin_broadcast_start)],
+        states={
+            BC_GET_TEXT:    [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_get_text)],
+            BC_ASK_BUTTON:  [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_ask_button)],
+            BC_GET_URL:     [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_get_url)],
+            BC_GET_BTN_NAME:[MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_get_btn_name)],
+            BC_CONFIRM:     [CallbackQueryHandler(bc_confirm_callback, pattern="^bc_")],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+
+    # Commandlar
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("delete", delete_movie))
     app.add_handler(CommandHandler("foydalanuvchi", show_user_count))
@@ -2115,29 +2390,21 @@ def build_application():
     app.add_handler(CommandHandler("top", admin_top_movies))
     app.add_handler(CommandHandler("help", admin_help))
     app.add_handler(CommandHandler("stat", admin_stat))
-    app.add_handler(CommandHandler("adminlik", admin_broadcast_start))
-    app.add_handler(CommandHandler("adminlikni_toxtatish", admin_broadcast_stop))
+    app.add_handler(CommandHandler("ochirish", admin_delete_menu))
 
+    # Conversation handlerlar
     app.add_handler(conv)
     app.add_handler(edit_conv)
     app.add_handler(jild_conv)
+    app.add_handler(broadcast_conv)
 
-    app.add_handler(MessageHandler(
-        (
-            filters.PHOTO
-            | filters.AUDIO
-            | filters.VOICE
-            | filters.Sticker.ALL
-            | filters.VIDEO_NOTE
-            | filters.ANIMATION
-        ) & filters.User(ADMIN_ID),
-        handle_admin_broadcast_message,
-    ))
-
+    # Callback handlerlar
     app.add_handler(CallbackQueryHandler(handle_series_part_callback, pattern=f"^{SERIES_CALLBACK_PREFIX}"))
     app.add_handler(CallbackQueryHandler(handle_favorite_callback, pattern="^fav:"))
     app.add_handler(CallbackQueryHandler(admin_broadcast_stop_callback, pattern="^stop_broadcast$"))
+    app.add_handler(CallbackQueryHandler(admin_delete_bc_callback, pattern="^del_bc:"))
 
+    # Oxirgi handlerlar
     app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     return app
