@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +6,7 @@ import logging
 import os
 import time
 from typing import TYPE_CHECKING
+import html
 
 try:
     from keep_alive import keep_alive, set_health_state
@@ -77,6 +77,13 @@ def ensure_pymongo_imports():
     pymongo_errors = importlib.import_module("pymongo.errors")
     MongoClient = pymongo.MongoClient
     PyMongoError = pymongo_errors.PyMongoError
+
+
+def escape_html(text: str) -> str:
+    """HTML maxsus belgilarini escape qiladi"""
+    if not text:
+        return ""
+    return html.escape(str(text))
 
 
 MONGO_URL = os.environ.get("MONGO_URL", "").strip()
@@ -813,7 +820,6 @@ async def send_confirm_prompt(update, data):
 KOD_VAQT, NOM, SIFAT, TIL, VAQT, CONFIRM, FOLDER_CHOICE, FOLDER_CREATE, FOLDER_PICK = range(9)
 EDIT_KOD, EDIT_NOM, EDIT_SIFAT, EDIT_TIL, EDIT_VAQT = range(9, 14)
 JILD_CODES, JILD_NAME = range(14, 16)
-# Broadcast states — BC_GET_MEDIA qo'shildi (range 16..22)
 BC_GET_TEXT, BC_GET_MEDIA, BC_ASK_BUTTON, BC_GET_URL, BC_GET_BTN_NAME, BC_CONFIRM = range(16, 22)
 
 
@@ -893,7 +899,6 @@ async def _remove_broadcast_stop_button(bot, chat_id, message_id):
 
 
 async def admin_broadcast_start(update, context):
-    """Broadcast conversation boshlaydi — matn so'raydi"""
     remember_user(update)
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
@@ -906,11 +911,11 @@ async def admin_broadcast_start(update, context):
     await update.message.reply_text(
         "📢 Ommaviy xabar yozish\n\n"
         "Yubormoqchi bo'lgan matnni kiriting.\n"
-        "Formatlash ishlaydi:\n"
-        "  *qalin matn*\n"
-        "  _kursiv matn_\n"
-        "  `kod`\n"
-        "  [Tugma nomi](https://link.com)\n\n"
+        "Formatlash (HTML) ishlaydi:\n"
+        "  <b>qalin matn</b>\n"
+        "  <i>kursiv matn</i>\n"
+        "  <code>kod</code>\n"
+        "  <a href='https://link.com'>Havola matni</a>\n\n"
         "❌ Bekor qilish uchun /cancel",
         reply_markup=get_bc_cancel_keyboard(),
     )
@@ -918,7 +923,6 @@ async def admin_broadcast_start(update, context):
 
 
 async def bc_get_text(update, context):
-    """Admin yozgan matnni oladi"""
     text = update.message.text.strip()
 
     if text in ("❌ Bekor qilish", "/cancel"):
@@ -943,15 +947,12 @@ async def bc_get_text(update, context):
 
 
 async def bc_get_media(update, context):
-    """Rasm, GIF yoki video qabul qiladi"""
     msg = update.message
 
-    # Skip tugmasi bosildi
     if msg.text and msg.text.strip() in ("⏭ Media qo'shmasdan o'tish", "❌ Bekor qilish", "/cancel"):
         if msg.text.strip() in ("❌ Bekor qilish", "/cancel"):
             await msg.reply_text("❌ Bekor qilindi.", reply_markup=get_admin_menu_keyboard())
             return ConversationHandler.END
-        # Media yo'q, tugmaga o'tamiz
         context.user_data["bc_media"] = None
         context.user_data["bc_media_type"] = None
         await msg.reply_text(
@@ -961,27 +962,21 @@ async def bc_get_media(update, context):
         )
         return BC_ASK_BUTTON
 
-    # Rasm
     if msg.photo:
         file_id = msg.photo[-1].file_id
         context.user_data["bc_media"] = file_id
         context.user_data["bc_media_type"] = "photo"
         media_label = "🖼 Rasm"
-
-    # GIF (animation)
     elif msg.animation:
         file_id = msg.animation.file_id
         context.user_data["bc_media"] = file_id
         context.user_data["bc_media_type"] = "animation"
         media_label = "🎞 GIF"
-
-    # Video
     elif msg.video:
         file_id = msg.video.file_id
         context.user_data["bc_media"] = file_id
         context.user_data["bc_media_type"] = "video"
         media_label = "🎬 Video"
-
     else:
         await msg.reply_text(
             "⚠️ Faqat rasm, GIF yoki video yuboring.\n"
@@ -1000,7 +995,6 @@ async def bc_get_media(update, context):
 
 
 async def bc_ask_button(update, context):
-    """Tugma kerakmi yo'qmi"""
     choice = update.message.text.strip()
 
     if choice in ("❌ Bekor qilish", "/cancel"):
@@ -1029,7 +1023,6 @@ async def bc_ask_button(update, context):
 
 
 async def bc_get_url(update, context):
-    """URL manzilini oladi"""
     url = update.message.text.strip()
 
     if url in ("❌ Bekor qilish", "/cancel"):
@@ -1055,7 +1048,6 @@ async def bc_get_url(update, context):
 
 
 async def bc_get_btn_name(update, context):
-    """Tugma nomini oladi"""
     btn_name = update.message.text.strip()
 
     if btn_name in ("❌ Bekor qilish", "/cancel"):
@@ -1085,48 +1077,80 @@ async def _bc_show_preview(update, context):
             [InlineKeyboardButton(bc_btn_name, url=bc_url)]
         ])
 
-    # Media bor bo'lsa, uni preview sifatida yuboramiz
+    # HTML parse_mode ishlatamiz — matnni xavfsiz yuboramiz
+    # Admin o'z matnini HTML formatida yozishi mumkin (<b>, <i> va hokazo)
+    # Lekin tugma nomi va boshqa qismlar escape qilinadi
+
     if bc_media and bc_media_type:
+        preview_caption = f"👁 Ko'rinishi (preview):\n\n{bc_text}"
         try:
             if bc_media_type == "photo":
                 await update.message.reply_photo(
                     photo=bc_media,
-                    caption=f"👁 Ko'rinishi (preview):\n\n{bc_text}",
+                    caption=preview_caption,
                     reply_markup=user_markup,
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                 )
             elif bc_media_type == "animation":
                 await update.message.reply_animation(
                     animation=bc_media,
-                    caption=f"👁 Ko'rinishi (preview):\n\n{bc_text}",
+                    caption=preview_caption,
                     reply_markup=user_markup,
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                 )
             elif bc_media_type == "video":
                 await update.message.reply_video(
                     video=bc_media,
-                    caption=f"👁 Ko'rinishi (preview):\n\n{bc_text}",
+                    caption=preview_caption,
                     reply_markup=user_markup,
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                 )
         except Exception:
             logger.exception("Preview media yuborishda xato")
-            await update.message.reply_text(
-                f"👁 Ko'rinishi (media preview xato):\n\n{bc_text}",
-                reply_markup=user_markup,
-                parse_mode="Markdown",
-            )
+            # HTML xato bo'lsa, parse_mode siz yuboramiz
+            try:
+                if bc_media_type == "photo":
+                    await update.message.reply_photo(
+                        photo=bc_media,
+                        caption=preview_caption,
+                        reply_markup=user_markup,
+                    )
+                elif bc_media_type == "animation":
+                    await update.message.reply_animation(
+                        animation=bc_media,
+                        caption=preview_caption,
+                        reply_markup=user_markup,
+                    )
+                elif bc_media_type == "video":
+                    await update.message.reply_video(
+                        video=bc_media,
+                        caption=preview_caption,
+                        reply_markup=user_markup,
+                    )
+            except Exception:
+                await update.message.reply_text(
+                    f"👁 Ko'rinishi (media preview xato):\n\n{bc_text}",
+                    reply_markup=user_markup,
+                )
     else:
         preview_header = "👁 Ko'rinishi:\n─────────────────\n"
         preview_footer = "\n─────────────────"
         if bc_url and bc_btn_name:
-            preview_footer += f"\n[ {bc_btn_name} ]"
+            preview_footer += f"\n[ {escape_html(bc_btn_name)} ]"
         preview_footer += "\n─────────────────\n\nYuborishni tasdiqlaysizmi?"
-        await update.message.reply_text(
-            preview_header + bc_text + preview_footer,
-            reply_markup=ReplyKeyboardRemove(),
-            parse_mode="Markdown",
-        )
+        try:
+            await update.message.reply_text(
+                preview_header + bc_text + preview_footer,
+                reply_markup=ReplyKeyboardRemove(),
+                parse_mode="HTML",
+            )
+        except Exception:
+            logger.exception("Preview matnni yuborishda xato (HTML parse)")
+            # HTML xato bo'lsa parse_mode siz yuboramiz
+            await update.message.reply_text(
+                preview_header + bc_text + preview_footer,
+                reply_markup=ReplyKeyboardRemove(),
+            )
 
     confirm_markup = InlineKeyboardMarkup([
         [
@@ -1140,43 +1164,85 @@ async def _bc_show_preview(update, context):
 
 
 async def _send_bc_message_to_user(bot, uid, bc_text, bc_media, bc_media_type, user_markup):
-    """Bitta foydalanuvchiga broadcast xabar yuboradi (media yoki matn)"""
+    """Bitta foydalanuvchiga broadcast xabar yuboradi"""
     if bc_media and bc_media_type:
         if bc_media_type == "photo":
-            await bot.send_photo(
-                chat_id=uid,
-                photo=bc_media,
-                caption=bc_text,
-                reply_markup=user_markup,
-                parse_mode="Markdown",
-            )
+            try:
+                await bot.send_photo(
+                    chat_id=uid,
+                    photo=bc_media,
+                    caption=bc_text,
+                    reply_markup=user_markup,
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                if "parse" in str(e).lower() or "can't parse" in str(e).lower():
+                    await bot.send_photo(
+                        chat_id=uid,
+                        photo=bc_media,
+                        caption=bc_text,
+                        reply_markup=user_markup,
+                    )
+                else:
+                    raise
         elif bc_media_type == "animation":
-            await bot.send_animation(
-                chat_id=uid,
-                animation=bc_media,
-                caption=bc_text,
-                reply_markup=user_markup,
-                parse_mode="Markdown",
-            )
+            try:
+                await bot.send_animation(
+                    chat_id=uid,
+                    animation=bc_media,
+                    caption=bc_text,
+                    reply_markup=user_markup,
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                if "parse" in str(e).lower() or "can't parse" in str(e).lower():
+                    await bot.send_animation(
+                        chat_id=uid,
+                        animation=bc_media,
+                        caption=bc_text,
+                        reply_markup=user_markup,
+                    )
+                else:
+                    raise
         elif bc_media_type == "video":
-            await bot.send_video(
-                chat_id=uid,
-                video=bc_media,
-                caption=bc_text,
-                reply_markup=user_markup,
-                parse_mode="Markdown",
-            )
+            try:
+                await bot.send_video(
+                    chat_id=uid,
+                    video=bc_media,
+                    caption=bc_text,
+                    reply_markup=user_markup,
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                if "parse" in str(e).lower() or "can't parse" in str(e).lower():
+                    await bot.send_video(
+                        chat_id=uid,
+                        video=bc_media,
+                        caption=bc_text,
+                        reply_markup=user_markup,
+                    )
+                else:
+                    raise
     else:
-        await bot.send_message(
-            chat_id=uid,
-            text=bc_text,
-            reply_markup=user_markup,
-            parse_mode="Markdown",
-        )
+        try:
+            await bot.send_message(
+                chat_id=uid,
+                text=bc_text,
+                reply_markup=user_markup,
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            if "parse" in str(e).lower() or "can't parse" in str(e).lower():
+                await bot.send_message(
+                    chat_id=uid,
+                    text=bc_text,
+                    reply_markup=user_markup,
+                )
+            else:
+                raise
 
 
 async def bc_confirm_callback(update, context):
-    """Tasdiqlash inline tugmalari"""
     global _broadcast_active, _broadcast_status_message_id, _admin_sent_messages
     query = update.callback_query
     if query is None:
@@ -1233,56 +1299,20 @@ async def bc_confirm_callback(update, context):
         taxminiy = round(total * 0.09 / 60)
         chat_id = update.effective_chat.id
 
-        # Adminga preview xabarni yuborish (o'chirish uchun saqlaymiz)
+        # Adminga preview xabarni yuborish
         try:
-            if bc_media and bc_media_type:
-                if bc_media_type == "photo":
-                    preview_msg = await context.bot.send_photo(
-                        chat_id=chat_id,
-                        photo=bc_media,
-                        caption=bc_text,
-                        reply_markup=user_markup,
-                        parse_mode="Markdown",
-                    )
-                elif bc_media_type == "animation":
-                    preview_msg = await context.bot.send_animation(
-                        chat_id=chat_id,
-                        animation=bc_media,
-                        caption=bc_text,
-                        reply_markup=user_markup,
-                        parse_mode="Markdown",
-                    )
-                elif bc_media_type == "video":
-                    preview_msg = await context.bot.send_video(
-                        chat_id=chat_id,
-                        video=bc_media,
-                        caption=bc_text,
-                        reply_markup=user_markup,
-                        parse_mode="Markdown",
-                    )
-                else:
-                    preview_msg = await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=bc_text,
-                        reply_markup=user_markup,
-                        parse_mode="Markdown",
-                    )
-            else:
-                preview_msg = await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=bc_text,
-                    reply_markup=user_markup,
-                    parse_mode="Markdown",
-                )
-
-            if ADMIN_ID not in _admin_sent_messages:
-                _admin_sent_messages[ADMIN_ID] = []
-            short_preview = bc_text[:50].replace("\n", " ")
-            _admin_sent_messages[ADMIN_ID].append({
-                "msg_id": preview_msg.message_id,
-                "chat_id": chat_id,
-                "preview": short_preview,
-            })
+            preview_msg = await _send_bc_preview_to_admin(
+                context.bot, chat_id, bc_text, bc_media, bc_media_type, user_markup
+            )
+            if preview_msg:
+                if ADMIN_ID not in _admin_sent_messages:
+                    _admin_sent_messages[ADMIN_ID] = []
+                short_preview = bc_text[:50].replace("\n", " ")
+                _admin_sent_messages[ADMIN_ID].append({
+                    "msg_id": preview_msg.message_id,
+                    "chat_id": chat_id,
+                    "preview": short_preview,
+                })
         except Exception:
             logger.exception("Admin preview xabarini yuborishda xato")
 
@@ -1350,8 +1380,32 @@ async def bc_confirm_callback(update, context):
     return BC_CONFIRM
 
 
+async def _send_bc_preview_to_admin(bot, chat_id, bc_text, bc_media, bc_media_type, user_markup):
+    """Admin uchun preview xabar yuboradi, xabarni qaytaradi"""
+    if bc_media and bc_media_type:
+        if bc_media_type == "photo":
+            try:
+                return await bot.send_photo(chat_id=chat_id, photo=bc_media, caption=bc_text, reply_markup=user_markup, parse_mode="HTML")
+            except Exception:
+                return await bot.send_photo(chat_id=chat_id, photo=bc_media, caption=bc_text, reply_markup=user_markup)
+        elif bc_media_type == "animation":
+            try:
+                return await bot.send_animation(chat_id=chat_id, animation=bc_media, caption=bc_text, reply_markup=user_markup, parse_mode="HTML")
+            except Exception:
+                return await bot.send_animation(chat_id=chat_id, animation=bc_media, caption=bc_text, reply_markup=user_markup)
+        elif bc_media_type == "video":
+            try:
+                return await bot.send_video(chat_id=chat_id, video=bc_media, caption=bc_text, reply_markup=user_markup, parse_mode="HTML")
+            except Exception:
+                return await bot.send_video(chat_id=chat_id, video=bc_media, caption=bc_text, reply_markup=user_markup)
+    else:
+        try:
+            return await bot.send_message(chat_id=chat_id, text=bc_text, reply_markup=user_markup, parse_mode="HTML")
+        except Exception:
+            return await bot.send_message(chat_id=chat_id, text=bc_text, reply_markup=user_markup)
+
+
 async def admin_broadcast_stop_callback(update, context):
-    """⛔ Yuborishni to'xtatish inline tugmasi"""
     global _broadcast_active, _broadcast_status_message_id
     query = update.callback_query
     if query is None:
@@ -1378,7 +1432,6 @@ async def admin_broadcast_stop_callback(update, context):
 # ===================== O'CHIRISH =====================
 
 async def admin_delete_menu(update, context):
-    """Admin o'z yuborgan broadcast xabarlarini o'chiradi"""
     global _admin_sent_messages
     remember_user(update)
     user_id = update.message.from_user.id
@@ -1415,7 +1468,6 @@ async def admin_delete_menu(update, context):
 
 
 async def admin_delete_bc_callback(update, context):
-    """O'chirish callback handler"""
     global _admin_sent_messages
     query = update.callback_query
     await query.answer()
@@ -1464,7 +1516,7 @@ async def admin_delete_bc_callback(update, context):
             _admin_sent_messages[ADMIN_ID].pop(idx)
             await query.message.edit_reply_markup(reply_markup=None)
             await query.message.reply_text(
-                f"✅ Xabar o'chirildi.",
+                "✅ Xabar o'chirildi.",
                 reply_markup=get_admin_menu_keyboard(),
             )
         except Exception as e:
@@ -2540,7 +2592,7 @@ def build_application():
         allow_reentry=True,
     )
 
-    # Broadcast conversation — BC_GET_MEDIA state qo'shildi
+    # Broadcast conversation
     broadcast_conv = ConversationHandler(
         entry_points=[CommandHandler("adminlik", admin_broadcast_start)],
         states={
