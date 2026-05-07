@@ -256,7 +256,7 @@ def get_all_required_channels():
     return run_channels_db(lambda col: list(col.find({}, {"_id": 0})))
 
 
-def add_required_channel(link: str, channel_id: int, title: str):
+def add_required_channel(link: str, channel_id: int, title: str, button_title: str = ""):
     run_channels_db(
         lambda col: col.update_one(
             {"channel_id": channel_id},
@@ -265,6 +265,7 @@ def add_required_channel(link: str, channel_id: int, title: str):
                     "channel_id": channel_id,
                     "link": link,
                     "title": title,
+                    "button_title": button_title,
                     "added_at": int(time.time()),
                 }
             },
@@ -579,10 +580,6 @@ def get_verification_keyboard():
 # ===================== KANAL SUBSCRIPTION HELPERS =====================
 
 async def check_user_subscribed(bot, user_id: int):
-    """
-    Foydalanuvchi barcha majburiy kanallarga obuna bo'lganmi tekshiradi.
-    Qaytaradi: (barchaga_obuna: bool, obuna_bolmagan_kanallar: list)
-    """
     try:
         channels = get_all_required_channels()
     except Exception:
@@ -610,9 +607,11 @@ def get_subscribe_keyboard(not_subscribed_channels: list):
     """Har bir kanal uchun tugma + 'Obuna bo'ldim' tugmasi"""
     rows = []
     for ch in not_subscribed_channels:
+        # button_title bo'lsa — uni ishlatamiz, bo'lmasa title
+        btn_label = ch.get("button_title") or ch.get("title") or "Kanalga o'tish"
         rows.append([
             InlineKeyboardButton(
-                f"📢 {ch.get('title', 'Kanalga o\'tish')}",
+                f"📢 {btn_label}",
                 url=ch["link"],
             )
         ])
@@ -942,6 +941,7 @@ KOD_VAQT, NOM, SIFAT, TIL, VAQT, CONFIRM, FOLDER_CHOICE, FOLDER_CREATE, FOLDER_P
 EDIT_KOD, EDIT_NOM, EDIT_SIFAT, EDIT_TIL, EDIT_VAQT = range(9, 14)
 JILD_CODES, JILD_NAME = range(14, 16)
 BC_GET_TEXT, BC_GET_MEDIA, BC_ASK_BUTTON, BC_GET_URL, BC_GET_BTN_NAME, BC_CONFIRM = range(16, 22)
+ADDCH_GET_TITLE = 22
 
 
 async def log_error(update: object, context):
@@ -2237,13 +2237,14 @@ async def list_series_ranges(update, context):
 
 async def admin_add_channel(update, context):
     """
-    /addchannel <link>  — public kanal
-    /addchannel <link> <channel_id>  — private kanal
+    /addchannel <link>           — public kanal
+    /addchannel <link> <id>      — private kanal
+    Keyin tugma nomini so'raydi.
     """
     remember_user(update)
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
-        return
+        return ConversationHandler.END
 
     if not context.args:
         await update.message.reply_text(
@@ -2255,54 +2256,78 @@ async def admin_add_channel(update, context):
             "⚠️ Bot kanalning ADMINISTRATORI bo'lishi shart!\n"
             "Kanal ID sini bilish uchun @userinfobot ga forward qiling."
         )
-        return
+        return ConversationHandler.END
 
     link = context.args[0].strip()
 
-    # Link formatini tekshirish
     if not (link.startswith("https://t.me/") or link.startswith("http://t.me/")):
         await update.message.reply_text(
             "❌ Noto'g'ri link. t.me linki bo'lishi kerak.\n"
             "Misol: https://t.me/kanal_username"
         )
-        return
+        return ConversationHandler.END
+
+    context.user_data["addch_link"] = link
+    context.user_data["addch_channel_id_arg"] = context.args[1] if len(context.args) >= 2 else None
+
+    await update.message.reply_text(
+        "✏️ Tugmada ko'rinadigan kanal nomini yozing:\n\n"
+        "Misol: 🎬 Kino kanalimiz",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return ADDCH_GET_TITLE
+
+
+async def addch_get_title(update, context):
+    button_title = update.message.text.strip()
+
+    if button_title in ("❌ Bekor qilish", "/cancel"):
+        await update.message.reply_text("❌ Bekor qilindi.", reply_markup=get_admin_menu_keyboard())
+        return ConversationHandler.END
+
+    if not button_title:
+        await update.message.reply_text("Nom bo'sh bo'lmasin. Qayta yozing:")
+        return ADDCH_GET_TITLE
+
+    d = context.user_data
+    link = d["addch_link"]
+    channel_id_arg = d.get("addch_channel_id_arg")
 
     processing_msg = await update.message.reply_text("⏳ Kanal tekshirilmoqda...")
 
-    # Private kanal (2 ta argument)
-    if len(context.args) >= 2:
-        channel_id_str = context.args[1].strip()
+    # Private kanal
+    if channel_id_arg:
         try:
-            channel_id = int(channel_id_str)
+            channel_id = int(channel_id_arg)
         except ValueError:
             await processing_msg.edit_text("❌ Kanal ID raqam bo'lishi kerak. Misol: -1001234567890")
-            return
+            return ConversationHandler.END
 
         try:
             chat = await context.bot.get_chat(channel_id)
             title = chat.title or str(channel_id)
         except Exception as e:
             await processing_msg.edit_text(
-                f"❌ Kanal topilmadi: {e}\n\n"
-                "Bot kanal admini bo'lishi shart!"
+                f"❌ Kanal topilmadi: {e}\n\nBot kanal admini bo'lishi shart!"
             )
-            return
+            return ConversationHandler.END
 
         try:
-            add_required_channel(link, channel_id, title)
+            add_required_channel(link, channel_id, title, button_title)
         except Exception:
             await processing_msg.edit_text("❌ Bazaga saqlashda xato yuz berdi.")
-            return
+            return ConversationHandler.END
 
         await processing_msg.edit_text(
             f"✅ Kanal qo'shildi!\n\n"
-            f"📢 Nom: {title}\n"
+            f"📢 Kanal nomi: {title}\n"
+            f"🔘 Tugma matni: {button_title}\n"
             f"🆔 ID: {channel_id}\n"
             f"🔗 Link: {link}"
         )
-        return
+        return ConversationHandler.END
 
-    # Public kanal (1 ta argument)
+    # Public kanal — private invite link tekshiruvi
     if "/+" in link:
         await processing_msg.edit_text(
             "⚠️ Private invite link uchun kanal ID sini ham yozing:\n\n"
@@ -2312,7 +2337,7 @@ async def admin_add_channel(update, context):
             "2. Kanalga biror xabar yuboring\n"
             "3. @userinfobot ga forward qiling"
         )
-        return
+        return ConversationHandler.END
 
     try:
         username = link.rstrip("/").split("/")[-1]
@@ -2321,12 +2346,11 @@ async def admin_add_channel(update, context):
         chat = await context.bot.get_chat(username)
         channel_id = chat.id
         title = chat.title or username
-
-        add_required_channel(link, channel_id, title)
-
+        add_required_channel(link, channel_id, title, button_title)
         await processing_msg.edit_text(
             f"✅ Kanal qo'shildi!\n\n"
-            f"📢 Nom: {title}\n"
+            f"📢 Kanal nomi: {title}\n"
+            f"🔘 Tugma matni: {button_title}\n"
             f"🆔 ID: {channel_id}\n"
             f"🔗 Link: {link}\n\n"
             f"Foydalanuvchilar endi bu kanalga obuna bo'lishi shart."
@@ -2337,6 +2361,7 @@ async def admin_add_channel(update, context):
             "Bot kanalning administratori bo'lishi shart!\n"
             "Botni kanalga admin qilib, qayta urinib ko'ring."
         )
+    return ConversationHandler.END
 
 
 async def admin_remove_channel(update, context):
@@ -2362,13 +2387,15 @@ async def admin_remove_channel(update, context):
     lines = ["📋 Majburiy kanallar ro'yxati:\n"]
     for i, ch in enumerate(channels, 1):
         join_count = ch.get("join_count", 0)
-        lines.append(f"{i}. {ch.get('title', '-')} — {join_count} ta kirish")
+        btn_label = ch.get("button_title") or ch.get("title", "-")
+        lines.append(f"{i}. {btn_label} — {join_count} ta kirish")
 
     buttons = []
     for ch in channels:
+        btn_label = ch.get("button_title") or ch.get("title", str(ch['channel_id']))
         buttons.append([
             InlineKeyboardButton(
-                f"🗑 {ch.get('title', str(ch['channel_id']))} ni o'chirish",
+                f"🗑 {btn_label} ni o'chirish",
                 callback_data=f"rmchannel:{ch['channel_id']}",
             )
         ])
@@ -2400,10 +2427,8 @@ async def admin_remove_channel_callback(update, context):
 
     try:
         channels = get_all_required_channels()
-        title = next(
-            (ch.get("title", str(channel_id)) for ch in channels if ch["channel_id"] == channel_id),
-            str(channel_id)
-        )
+        ch = next((c for c in channels if c["channel_id"] == channel_id), None)
+        title = (ch.get("button_title") or ch.get("title", str(channel_id))) if ch else str(channel_id)
         remove_required_channel(channel_id)
     except Exception:
         await query.message.edit_reply_markup(reply_markup=None)
@@ -2443,9 +2468,11 @@ async def admin_channels_stat(update, context):
         join_count = ch.get("join_count", 0)
         total_joins += join_count
         title = ch.get("title", "-")
+        btn_label = ch.get("button_title") or title
         link = ch.get("link", "-")
         lines.append(
             f"{i}. 📢 {title}\n"
+            f"   🔘 Tugma: {btn_label}\n"
             f"   🔗 {link}\n"
             f"   👥 Bot orqali kirdi: {join_count} ta\n"
         )
@@ -2856,6 +2883,18 @@ def build_application():
         allow_reentry=True,
     )
 
+    # AddChannel conversation
+    addchannel_conv = ConversationHandler(
+        entry_points=[CommandHandler("addchannel", admin_add_channel)],
+        states={
+            ADDCH_GET_TITLE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), addch_get_title),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+
     # Commandlar
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("delete", delete_movie))
@@ -2866,9 +2905,6 @@ def build_application():
     app.add_handler(CommandHandler("help", admin_help))
     app.add_handler(CommandHandler("stat", admin_stat))
     app.add_handler(CommandHandler("ochirish", admin_delete_menu))
-
-    # Kanal boshqaruvi commandlar
-    app.add_handler(CommandHandler("addchannel", admin_add_channel))
     app.add_handler(CommandHandler("removechannel", admin_remove_channel))
     app.add_handler(CommandHandler("kanallar", admin_channels_stat))
 
@@ -2877,6 +2913,7 @@ def build_application():
     app.add_handler(edit_conv)
     app.add_handler(jild_conv)
     app.add_handler(broadcast_conv)
+    app.add_handler(addchannel_conv)
 
     # Kanal callback handlerlar
     app.add_handler(CallbackQueryHandler(handle_check_subscription_callback, pattern="^check_subscription$"))
