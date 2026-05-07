@@ -42,6 +42,7 @@ InlineKeyboardButton = None
 InlineKeyboardMarkup = None
 ReplyKeyboardMarkup = None
 ReplyKeyboardRemove = None
+ChatMemberHandler = None
 MongoClient = None
 PyMongoError = Exception
 
@@ -50,6 +51,7 @@ def ensure_telegram_imports():
     global ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes
     global ConversationHandler, MessageHandler, filters
     global InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
+    global ChatMemberHandler
     if ApplicationBuilder is not None:
         return
 
@@ -66,6 +68,7 @@ def ensure_telegram_imports():
     ConversationHandler = telegram_ext.ConversationHandler
     MessageHandler = telegram_ext.MessageHandler
     filters = telegram_ext.filters
+    ChatMemberHandler = telegram_ext.ChatMemberHandler
 
 
 def ensure_pymongo_imports():
@@ -80,7 +83,6 @@ def ensure_pymongo_imports():
 
 
 def escape_html(text: str) -> str:
-    """HTML maxsus belgilarini escape qiladi"""
     if not text:
         return ""
     return html.escape(str(text))
@@ -93,6 +95,7 @@ movies_col = None
 series_col = None
 folders_col = None
 users_col = None
+channels_col = None
 SERVICE_UNAVAILABLE_TEXT = "Serverda vaqtincha muammo bor. Keyinroq yana urinib ko'ring."
 DEFAULT_SIFAT = os.environ.get("DEFAULT_SIFAT", "720p").strip() or "720p"
 DEFAULT_TIL = os.environ.get("DEFAULT_TIL", "O'zbek").strip() or "O'zbek"
@@ -115,11 +118,11 @@ SERIES_CALLBACK_PREFIX = "series_part:"
 
 _broadcast_active = False
 _broadcast_status_message_id = None
-_admin_sent_messages = {}  # {ADMIN_ID: [{"msg_id": int, "chat_id": int, "preview": str}]}
+_admin_sent_messages = {}
 
 
 def reset_db_connection():
-    global client, db, movies_col, series_col, folders_col, users_col
+    global client, db, movies_col, series_col, folders_col, users_col, channels_col
     if client is not None:
         try:
             client.close()
@@ -131,11 +134,12 @@ def reset_db_connection():
     series_col = None
     folders_col = None
     users_col = None
+    channels_col = None
     set_health_state(db="disconnected")
 
 
 def get_movies_col():
-    global client, db, movies_col, series_col, folders_col, users_col
+    global client, db, movies_col, series_col, folders_col, users_col, channels_col
     if movies_col is not None:
         return movies_col
     ensure_pymongo_imports()
@@ -155,6 +159,7 @@ def get_movies_col():
         series_col = db["series_groups"]
         folders_col = db["movie_folders"]
         users_col = db["users"]
+        channels_col = db["required_channels"]
         set_health_state(db="connected", last_error="")
         return movies_col
     except Exception as exc:
@@ -226,6 +231,65 @@ def run_folders_db(operation):
         set_health_state(db="error", last_error=f"MongoDB: {exc}")
         raise
 
+
+# ===================== KANAL DB FUNKSIYALARI =====================
+
+def get_channels_col():
+    global channels_col
+    if channels_col is not None:
+        return channels_col
+    get_movies_col()
+    return channels_col
+
+
+def run_channels_db(operation):
+    col = get_channels_col()
+    try:
+        return operation(col)
+    except PyMongoError as exc:
+        reset_db_connection()
+        set_health_state(db="error", last_error=f"MongoDB: {exc}")
+        raise
+
+
+def get_all_required_channels():
+    return run_channels_db(lambda col: list(col.find({}, {"_id": 0})))
+
+
+def add_required_channel(link: str, channel_id: int, title: str):
+    run_channels_db(
+        lambda col: col.update_one(
+            {"channel_id": channel_id},
+            {
+                "$set": {
+                    "channel_id": channel_id,
+                    "link": link,
+                    "title": title,
+                    "added_at": int(time.time()),
+                }
+            },
+            upsert=True,
+        )
+    )
+
+
+def remove_required_channel(channel_id: int):
+    run_channels_db(lambda col: col.delete_one({"channel_id": channel_id}))
+
+
+def increment_channel_join_count(channel_id: int):
+    try:
+        run_channels_db(
+            lambda col: col.update_one(
+                {"channel_id": channel_id},
+                {"$inc": {"join_count": 1}},
+            )
+        )
+    except Exception:
+        pass
+
+
+# ===================== MOVIES DB =====================
 
 def save_movie(code, data):
     run_db(lambda col: col.update_one({"code": code}, {"$set": {**data, "code": code}}, upsert=True))
@@ -512,6 +576,61 @@ def get_verification_keyboard():
     )
 
 
+# ===================== KANAL SUBSCRIPTION HELPERS =====================
+
+async def check_user_subscribed(bot, user_id: int):
+    """
+    Foydalanuvchi barcha majburiy kanallarga obuna bo'lganmi tekshiradi.
+    Qaytaradi: (barchaga_obuna: bool, obuna_bolmagan_kanallar: list)
+    """
+    try:
+        channels = get_all_required_channels()
+    except Exception:
+        return True, []
+
+    if not channels:
+        return True, []
+
+    not_subscribed = []
+    for ch in channels:
+        try:
+            member = await bot.get_chat_member(
+                chat_id=ch["channel_id"],
+                user_id=user_id,
+            )
+            if member.status in ("left", "kicked", "banned"):
+                not_subscribed.append(ch)
+        except Exception:
+            pass
+
+    return len(not_subscribed) == 0, not_subscribed
+
+
+def get_subscribe_keyboard(not_subscribed_channels: list):
+    """Har bir kanal uchun tugma + 'Obuna bo'ldim' tugmasi"""
+    rows = []
+    for ch in not_subscribed_channels:
+        rows.append([
+            InlineKeyboardButton(
+                f"📢 {ch.get('title', 'Kanalga o\'tish')}",
+                url=ch["link"],
+            )
+        ])
+    rows.append([
+        InlineKeyboardButton("✅ Obuna bo'ldim", callback_data="check_subscription")
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def send_subscribe_required_message(target, not_subscribed_channels: list):
+    await target.reply_text(
+        "⚠️ Botdan foydalanish uchun quyidagi kanal(lar)ga obuna bo'ling:\n\n"
+        "Obuna bo'lgandan so'ng ✅ <b>Obuna bo'ldim</b> tugmasini bosing.",
+        reply_markup=get_subscribe_keyboard(not_subscribed_channels),
+        parse_mode="HTML",
+    )
+
+
 # ===================== MOVIE HELPERS =====================
 
 def get_movie_reply_markup(code, user_id=None):
@@ -720,6 +839,8 @@ def get_admin_menu_keyboard():
         [
             ["/edit", "/delete <kod>"],
             ["/jild", "/seriallist"],
+            ["/addchannel <link>", "/removechannel"],
+            ["/kanallar"],
             ["/foydalanuvchi 777", "/adminlik"],
             ["/ochirish", "/stat"],
             ["/top", "/sevimli"],
@@ -1063,7 +1184,6 @@ async def bc_get_btn_name(update, context):
 
 
 async def _bc_show_preview(update, context):
-    """Preview ko'rsatadi va tasdiqlash so'raydi"""
     d = context.user_data
     bc_text = d.get("bc_text", "")
     bc_url = d.get("bc_url")
@@ -1076,10 +1196,6 @@ async def _bc_show_preview(update, context):
         user_markup = InlineKeyboardMarkup([
             [InlineKeyboardButton(bc_btn_name, url=bc_url)]
         ])
-
-    # HTML parse_mode ishlatamiz — matnni xavfsiz yuboramiz
-    # Admin o'z matnini HTML formatida yozishi mumkin (<b>, <i> va hokazo)
-    # Lekin tugma nomi va boshqa qismlar escape qilinadi
 
     if bc_media and bc_media_type:
         preview_caption = f"👁 Ko'rinishi (preview):\n\n{bc_text}"
@@ -1107,31 +1223,15 @@ async def _bc_show_preview(update, context):
                 )
         except Exception:
             logger.exception("Preview media yuborishda xato")
-            # HTML xato bo'lsa, parse_mode siz yuboramiz
             try:
                 if bc_media_type == "photo":
-                    await update.message.reply_photo(
-                        photo=bc_media,
-                        caption=preview_caption,
-                        reply_markup=user_markup,
-                    )
+                    await update.message.reply_photo(photo=bc_media, caption=preview_caption, reply_markup=user_markup)
                 elif bc_media_type == "animation":
-                    await update.message.reply_animation(
-                        animation=bc_media,
-                        caption=preview_caption,
-                        reply_markup=user_markup,
-                    )
+                    await update.message.reply_animation(animation=bc_media, caption=preview_caption, reply_markup=user_markup)
                 elif bc_media_type == "video":
-                    await update.message.reply_video(
-                        video=bc_media,
-                        caption=preview_caption,
-                        reply_markup=user_markup,
-                    )
+                    await update.message.reply_video(video=bc_media, caption=preview_caption, reply_markup=user_markup)
             except Exception:
-                await update.message.reply_text(
-                    f"👁 Ko'rinishi (media preview xato):\n\n{bc_text}",
-                    reply_markup=user_markup,
-                )
+                await update.message.reply_text(f"👁 Ko'rinishi (media preview xato):\n\n{bc_text}", reply_markup=user_markup)
     else:
         preview_header = "👁 Ko'rinishi:\n─────────────────\n"
         preview_footer = "\n─────────────────"
@@ -1146,7 +1246,6 @@ async def _bc_show_preview(update, context):
             )
         except Exception:
             logger.exception("Preview matnni yuborishda xato (HTML parse)")
-            # HTML xato bo'lsa parse_mode siz yuboramiz
             await update.message.reply_text(
                 preview_header + bc_text + preview_footer,
                 reply_markup=ReplyKeyboardRemove(),
@@ -1164,80 +1263,37 @@ async def _bc_show_preview(update, context):
 
 
 async def _send_bc_message_to_user(bot, uid, bc_text, bc_media, bc_media_type, user_markup):
-    """Bitta foydalanuvchiga broadcast xabar yuboradi"""
     if bc_media and bc_media_type:
         if bc_media_type == "photo":
             try:
-                await bot.send_photo(
-                    chat_id=uid,
-                    photo=bc_media,
-                    caption=bc_text,
-                    reply_markup=user_markup,
-                    parse_mode="HTML",
-                )
+                await bot.send_photo(chat_id=uid, photo=bc_media, caption=bc_text, reply_markup=user_markup, parse_mode="HTML")
             except Exception as e:
                 if "parse" in str(e).lower() or "can't parse" in str(e).lower():
-                    await bot.send_photo(
-                        chat_id=uid,
-                        photo=bc_media,
-                        caption=bc_text,
-                        reply_markup=user_markup,
-                    )
+                    await bot.send_photo(chat_id=uid, photo=bc_media, caption=bc_text, reply_markup=user_markup)
                 else:
                     raise
         elif bc_media_type == "animation":
             try:
-                await bot.send_animation(
-                    chat_id=uid,
-                    animation=bc_media,
-                    caption=bc_text,
-                    reply_markup=user_markup,
-                    parse_mode="HTML",
-                )
+                await bot.send_animation(chat_id=uid, animation=bc_media, caption=bc_text, reply_markup=user_markup, parse_mode="HTML")
             except Exception as e:
                 if "parse" in str(e).lower() or "can't parse" in str(e).lower():
-                    await bot.send_animation(
-                        chat_id=uid,
-                        animation=bc_media,
-                        caption=bc_text,
-                        reply_markup=user_markup,
-                    )
+                    await bot.send_animation(chat_id=uid, animation=bc_media, caption=bc_text, reply_markup=user_markup)
                 else:
                     raise
         elif bc_media_type == "video":
             try:
-                await bot.send_video(
-                    chat_id=uid,
-                    video=bc_media,
-                    caption=bc_text,
-                    reply_markup=user_markup,
-                    parse_mode="HTML",
-                )
+                await bot.send_video(chat_id=uid, video=bc_media, caption=bc_text, reply_markup=user_markup, parse_mode="HTML")
             except Exception as e:
                 if "parse" in str(e).lower() or "can't parse" in str(e).lower():
-                    await bot.send_video(
-                        chat_id=uid,
-                        video=bc_media,
-                        caption=bc_text,
-                        reply_markup=user_markup,
-                    )
+                    await bot.send_video(chat_id=uid, video=bc_media, caption=bc_text, reply_markup=user_markup)
                 else:
                     raise
     else:
         try:
-            await bot.send_message(
-                chat_id=uid,
-                text=bc_text,
-                reply_markup=user_markup,
-                parse_mode="HTML",
-            )
+            await bot.send_message(chat_id=uid, text=bc_text, reply_markup=user_markup, parse_mode="HTML")
         except Exception as e:
             if "parse" in str(e).lower() or "can't parse" in str(e).lower():
-                await bot.send_message(
-                    chat_id=uid,
-                    text=bc_text,
-                    reply_markup=user_markup,
-                )
+                await bot.send_message(chat_id=uid, text=bc_text, reply_markup=user_markup)
             else:
                 raise
 
@@ -1259,10 +1315,7 @@ async def bc_confirm_callback(update, context):
 
     if query.data == "bc_edit":
         await query.message.edit_reply_markup(reply_markup=None)
-        await query.message.reply_text(
-            "Yangi matnni yuboring:",
-            reply_markup=get_bc_cancel_keyboard(),
-        )
+        await query.message.reply_text("Yangi matnni yuboring:", reply_markup=get_bc_cancel_keyboard())
         return BC_GET_TEXT
 
     if query.data == "bc_yes":
@@ -1277,9 +1330,7 @@ async def bc_confirm_callback(update, context):
 
         user_markup = None
         if bc_url and bc_btn_name:
-            user_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton(bc_btn_name, url=bc_url)]
-            ])
+            user_markup = InlineKeyboardMarkup([[InlineKeyboardButton(bc_btn_name, url=bc_url)]])
 
         try:
             user_ids = get_all_user_ids()
@@ -1289,21 +1340,15 @@ async def bc_confirm_callback(update, context):
             return ConversationHandler.END
 
         if not user_ids:
-            await query.message.reply_text(
-                "Bazada foydalanuvchilar topilmadi.",
-                reply_markup=get_admin_menu_keyboard(),
-            )
+            await query.message.reply_text("Bazada foydalanuvchilar topilmadi.", reply_markup=get_admin_menu_keyboard())
             return ConversationHandler.END
 
         total = len(user_ids)
         taxminiy = round(total * 0.09 / 60)
         chat_id = update.effective_chat.id
 
-        # Adminga preview xabarni yuborish
         try:
-            preview_msg = await _send_bc_preview_to_admin(
-                context.bot, chat_id, bc_text, bc_media, bc_media_type, user_markup
-            )
+            preview_msg = await _send_bc_preview_to_admin(context.bot, chat_id, bc_text, bc_media, bc_media_type, user_markup)
             if preview_msg:
                 if ADMIN_ID not in _admin_sent_messages:
                     _admin_sent_messages[ADMIN_ID] = []
@@ -1341,9 +1386,7 @@ async def bc_confirm_callback(update, context):
                 if not _broadcast_active:
                     break
                 try:
-                    await _send_bc_message_to_user(
-                        bot, int(uid), bc_text, bc_media, bc_media_type, user_markup
-                    )
+                    await _send_bc_message_to_user(bot, int(uid), bc_text, bc_media, bc_media_type, user_markup)
                     sent += 1
                 except Exception as e:
                     err = str(e).lower()
@@ -1366,11 +1409,7 @@ async def bc_confirm_callback(update, context):
                 lines.append(f"Boshqa xato: {failed} ta")
 
             try:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text="\n".join(lines),
-                    reply_markup=get_admin_menu_keyboard(),
-                )
+                await bot.send_message(chat_id=chat_id, text="\n".join(lines), reply_markup=get_admin_menu_keyboard())
             except Exception:
                 pass
 
@@ -1381,7 +1420,6 @@ async def bc_confirm_callback(update, context):
 
 
 async def _send_bc_preview_to_admin(bot, chat_id, bc_text, bc_media, bc_media_type, user_markup):
-    """Admin uchun preview xabar yuboradi, xabarni qaytaradi"""
     if bc_media and bc_media_type:
         if bc_media_type == "photo":
             try:
@@ -1423,10 +1461,7 @@ async def admin_broadcast_stop_callback(update, context):
         pass
     _broadcast_status_message_id = None
 
-    await query.message.reply_text(
-        "⛔ Ommaviy xabar to'xtatildi.",
-        reply_markup=get_admin_menu_keyboard(),
-    )
+    await query.message.reply_text("⛔ Ommaviy xabar to'xtatildi.", reply_markup=get_admin_menu_keyboard())
 
 
 # ===================== O'CHIRISH =====================
@@ -1486,19 +1521,13 @@ async def admin_delete_bc_callback(update, context):
         deleted = 0
         for m in msgs:
             try:
-                await context.bot.delete_message(
-                    chat_id=m["chat_id"],
-                    message_id=m["msg_id"],
-                )
+                await context.bot.delete_message(chat_id=m["chat_id"], message_id=m["msg_id"])
                 deleted += 1
             except Exception as e:
                 logger.warning(f"Xabarni o'chirishda xato: {e}")
         _admin_sent_messages[ADMIN_ID] = []
         await query.message.edit_reply_markup(reply_markup=None)
-        await query.message.reply_text(
-            f"🗑 {deleted} ta xabar o'chirildi.",
-            reply_markup=get_admin_menu_keyboard(),
-        )
+        await query.message.reply_text(f"🗑 {deleted} ta xabar o'chirildi.", reply_markup=get_admin_menu_keyboard())
         return
 
     try:
@@ -1509,16 +1538,10 @@ async def admin_delete_bc_callback(update, context):
     if 0 <= idx < len(msgs):
         m = msgs[idx]
         try:
-            await context.bot.delete_message(
-                chat_id=m["chat_id"],
-                message_id=m["msg_id"],
-            )
+            await context.bot.delete_message(chat_id=m["chat_id"], message_id=m["msg_id"])
             _admin_sent_messages[ADMIN_ID].pop(idx)
             await query.message.edit_reply_markup(reply_markup=None)
-            await query.message.reply_text(
-                "✅ Xabar o'chirildi.",
-                reply_markup=get_admin_menu_keyboard(),
-            )
+            await query.message.reply_text("✅ Xabar o'chirildi.", reply_markup=get_admin_menu_keyboard())
         except Exception as e:
             await query.message.edit_reply_markup(reply_markup=None)
             await query.message.reply_text(
@@ -1550,6 +1573,10 @@ async def admin_help(update, context):
         "  /jild — yangi jild yaratish\n\n"
         "Seriallar:\n"
         "  /seriallist — barcha serial diapazonlarini ko'rish\n\n"
+        "Kanal boshqaruvi:\n"
+        "  /addchannel <link> — majburiy kanal qo'shish\n"
+        "  /removechannel — kanal o'chirish\n"
+        "  /kanallar — kanallar statistikasi\n\n"
         "Statistika:\n"
         "  /foydalanuvchi 777 — foydalanuvchilar soni\n"
         "  /stat — bot statistikasi\n"
@@ -1576,6 +1603,7 @@ async def admin_stat(update, context):
         total_folders = run_folders_db(lambda col: col.count_documents({}))
         total_series = run_series_db(lambda col: col.count_documents({}))
         last_code, next_code = get_last_and_next_movie_code()
+        total_channels = run_channels_db(lambda col: col.count_documents({}))
     except Exception:
         logger.exception("Statistikani olishda xato")
         await reply_service_unavailable(update)
@@ -1587,6 +1615,7 @@ async def admin_stat(update, context):
         f"Kinolar: {total_movies} ta\n"
         f"Jildlar: {total_folders} ta\n"
         f"Serial diapazonlari: {total_series} ta\n"
+        f"Majburiy kanallar: {total_channels} ta\n"
         f"Oxirgi kiritilgan kod: {last_code}\n"
         f"Keyingi tavsiya kod: {next_code}"
     )
@@ -1737,19 +1766,13 @@ async def get_kod_vaqt(update, context):
         return KOD_VAQT
 
     d["kod"] = code
-    await update.message.reply_text(
-        "Kino nomini kiriting:",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    await update.message.reply_text("Kino nomini kiriting:", reply_markup=ReplyKeyboardRemove())
     return NOM
 
 
 async def get_nom(update, context):
     context.user_data["nom"] = update.message.text.strip()
-    await update.message.reply_text(
-        "Sifatini tanlang yoki qo'lda yozing:",
-        reply_markup=get_sifat_keyboard(),
-    )
+    await update.message.reply_text("Sifatini tanlang yoki qo'lda yozing:", reply_markup=get_sifat_keyboard())
     return SIFAT
 
 
@@ -1760,10 +1783,7 @@ async def get_sifat(update, context):
     else:
         context.user_data["sifat"] = raw or DEFAULT_SIFAT
 
-    await update.message.reply_text(
-        "Tilini tanlang yoki qo'lda yozing:",
-        reply_markup=get_til_keyboard(),
-    )
+    await update.message.reply_text("Tilini tanlang yoki qo'lda yozing:", reply_markup=get_til_keyboard())
     return TIL
 
 
@@ -1831,10 +1851,7 @@ async def confirm_save(update, context):
     d.pop("vaqt_draft", None)
     d.pop("vaqt_auto", None)
 
-    await update.message.reply_text(
-        "📁 Jildga saqlashni xohlaysizmi?",
-        reply_markup=get_folder_choice_keyboard(),
-    )
+    await update.message.reply_text("📁 Jildga saqlashni xohlaysizmi?", reply_markup=get_folder_choice_keyboard())
     return FOLDER_CHOICE
 
 
@@ -1887,10 +1904,7 @@ async def handle_folder_choice(update, context):
         return await finish_movie_save(update, context)
 
     if choice == FOLDER_CREATE_TEXT:
-        await update.message.reply_text(
-            "Yangi jild nomini yozing:",
-            reply_markup=ReplyKeyboardRemove(),
-        )
+        await update.message.reply_text("Yangi jild nomini yozing:", reply_markup=ReplyKeyboardRemove())
         return FOLDER_CREATE
 
     if choice == FOLDER_ADD_EXISTING_TEXT:
@@ -1906,16 +1920,10 @@ async def handle_folder_choice(update, context):
                 reply_markup=get_folder_choice_keyboard(),
             )
             return FOLDER_CHOICE
-        await update.message.reply_text(
-            "Jildni tanlang:",
-            reply_markup=build_folder_list_keyboard(folder_names),
-        )
+        await update.message.reply_text("Jildni tanlang:", reply_markup=build_folder_list_keyboard(folder_names))
         return FOLDER_PICK
 
-    await update.message.reply_text(
-        "Iltimos, tugmalardan birini tanlang.",
-        reply_markup=get_folder_choice_keyboard(),
-    )
+    await update.message.reply_text("Iltimos, tugmalardan birini tanlang.", reply_markup=get_folder_choice_keyboard())
     return FOLDER_CHOICE
 
 
@@ -1931,9 +1939,7 @@ async def handle_folder_create(update, context):
         await reply_service_unavailable(update)
         return ConversationHandler.END
     if exists:
-        await update.message.reply_text(
-            "⚠️ Bu nomli jild bor. Boshqa nom kiriting yoki mavjud jildga qo'shishdan foydalaning:"
-        )
+        await update.message.reply_text("⚠️ Bu nomli jild bor. Boshqa nom kiriting yoki mavjud jildga qo'shishdan foydalaning:")
         return FOLDER_CREATE
     return await save_to_folder_and_finish(update, context, folder_name)
 
@@ -1941,10 +1947,7 @@ async def handle_folder_create(update, context):
 async def handle_folder_pick(update, context):
     value = update.message.text.strip()
     if value == FOLDER_BACK_TEXT:
-        await update.message.reply_text(
-            "Jildga saqlashni xohlaysizmi?",
-            reply_markup=get_folder_choice_keyboard(),
-        )
+        await update.message.reply_text("Jildga saqlashni xohlaysizmi?", reply_markup=get_folder_choice_keyboard())
         return FOLDER_CHOICE
     if value == FOLDER_SKIP_TEXT:
         return await finish_movie_save(update, context)
@@ -1955,10 +1958,7 @@ async def handle_folder_pick(update, context):
         await reply_service_unavailable(update)
         return ConversationHandler.END
     if value not in folder_names:
-        await update.message.reply_text(
-            "Ro'yxatdan jild tanlang.",
-            reply_markup=build_folder_list_keyboard(folder_names),
-        )
+        await update.message.reply_text("Ro'yxatdan jild tanlang.", reply_markup=build_folder_list_keyboard(folder_names))
         return FOLDER_PICK
     return await save_to_folder_and_finish(update, context, value)
 
@@ -1988,24 +1988,15 @@ async def jild_get_codes(update, context):
 
     if value == JILD_CLEAR_TEXT:
         d["jild_codes"] = []
-        await update.message.reply_text(
-            "Kodlar ro'yxati tozalandi. Yangi kodlarni yuboring.",
-            reply_markup=get_jild_codes_keyboard(),
-        )
+        await update.message.reply_text("Kodlar ro'yxati tozalandi. Yangi kodlarni yuboring.", reply_markup=get_jild_codes_keyboard())
         return JILD_CODES
 
     if value == JILD_FINISH_TEXT:
         if not current_codes:
-            await update.message.reply_text(
-                "Hali birorta kod kiritilmadi. Avval kod yuboring.",
-                reply_markup=get_jild_codes_keyboard(),
-            )
+            await update.message.reply_text("Hali birorta kod kiritilmadi. Avval kod yuboring.", reply_markup=get_jild_codes_keyboard())
             return JILD_CODES
         d["jild_codes"] = sort_codes_for_folder(list(current_codes))
-        await update.message.reply_text(
-            "Endi jild nomini yozing:",
-            reply_markup=ReplyKeyboardRemove(),
-        )
+        await update.message.reply_text("Endi jild nomini yozing:", reply_markup=ReplyKeyboardRemove())
         return JILD_NAME
 
     parsed_codes, invalid_tokens = parse_codes_input(value)
@@ -2017,10 +2008,7 @@ async def jild_get_codes(update, context):
         )
         return JILD_CODES
     if not parsed_codes:
-        await update.message.reply_text(
-            "Kodlarni kiriting.",
-            reply_markup=get_jild_codes_keyboard(),
-        )
+        await update.message.reply_text("Kodlarni kiriting.", reply_markup=get_jild_codes_keyboard())
         return JILD_CODES
 
     try:
@@ -2045,10 +2033,7 @@ async def jild_get_codes(update, context):
     if invalid_tokens:
         message_lines.append(f"⚠️ Noto'g'ri qiymat(lar): {', '.join(invalid_tokens)}")
     message_lines.append(f"Tayyor bo'lsa {JILD_FINISH_TEXT} tugmasini bosing.")
-    await update.message.reply_text(
-        "\n".join(message_lines),
-        reply_markup=get_jild_codes_keyboard(),
-    )
+    await update.message.reply_text("\n".join(message_lines), reply_markup=get_jild_codes_keyboard())
     return JILD_CODES
 
 
@@ -2061,10 +2046,7 @@ async def jild_get_name(update, context):
     d = context.user_data
     codes = d.get("jild_codes", [])
     if not codes:
-        await update.message.reply_text(
-            "Kodlar topilmadi. /jild buyrug'ini qayta ishga tushiring.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
+        await update.message.reply_text("Kodlar topilmadi. /jild buyrug'ini qayta ishga tushiring.", reply_markup=ReplyKeyboardRemove())
         return ConversationHandler.END
 
     try:
@@ -2130,14 +2112,8 @@ async def edit_get_kod(update, context):
 
 async def edit_get_nom(update, context):
     new_nom = update.message.text.strip()
-    if new_nom:
-        context.user_data['nom'] = new_nom
-    else:
-        context.user_data['nom'] = context.user_data['current_data']['nom']
-    await update.message.reply_text(
-        "Yangi sifatni tanlang yoki kiriting (bo'sh qoldiring saqlash uchun):",
-        reply_markup=get_sifat_keyboard(),
-    )
+    context.user_data['nom'] = new_nom if new_nom else context.user_data['current_data']['nom']
+    await update.message.reply_text("Yangi sifatni tanlang yoki kiriting (bo'sh qoldiring saqlash uchun):", reply_markup=get_sifat_keyboard())
     return EDIT_SIFAT
 
 
@@ -2147,10 +2123,7 @@ async def edit_get_sifat(update, context):
         context.user_data['sifat'] = new_sifat
     else:
         context.user_data['sifat'] = context.user_data['current_data']['sifat']
-    await update.message.reply_text(
-        "Yangi tilni tanlang yoki kiriting (bo'sh qoldiring saqlash uchun):",
-        reply_markup=get_til_keyboard(),
-    )
+    await update.message.reply_text("Yangi tilni tanlang yoki kiriting (bo'sh qoldiring saqlash uchun):", reply_markup=get_til_keyboard())
     return EDIT_TIL
 
 
@@ -2164,19 +2137,13 @@ async def edit_get_til(update, context):
         context.user_data['til'] = new_til
     else:
         context.user_data['til'] = context.user_data['current_data']['til']
-    await update.message.reply_text(
-        "Yangi davomiylikni kiriting (bo'sh qoldiring saqlash uchun):",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    await update.message.reply_text("Yangi davomiylikni kiriting (bo'sh qoldiring saqlash uchun):", reply_markup=ReplyKeyboardRemove())
     return EDIT_VAQT
 
 
 async def edit_get_vaqt(update, context):
     new_vaqt = update.message.text.strip()
-    if new_vaqt:
-        context.user_data['vaqt'] = new_vaqt
-    else:
-        context.user_data['vaqt'] = context.user_data['current_data']['vaqt']
+    context.user_data['vaqt'] = new_vaqt if new_vaqt else context.user_data['current_data']['vaqt']
     d = context.user_data
     code = d['edit_code']
     data = {
@@ -2193,10 +2160,7 @@ async def edit_get_vaqt(update, context):
         logger.exception("Kinoni tahrirlashda xato yuz berdi")
         await reply_service_unavailable(update)
         return ConversationHandler.END
-    await update.message.reply_text(
-        "✅ Tahrirlandi!",
-        reply_markup=get_admin_menu_keyboard(),
-    )
+    await update.message.reply_text("✅ Tahrirlandi!", reply_markup=get_admin_menu_keyboard())
     return ConversationHandler.END
 
 
@@ -2267,6 +2231,272 @@ async def list_series_ranges(update, context):
     for item in ranges:
         lines.append(f"{item['start_code_num']}-{item['end_code_num']} | {item['title']}")
     await update.message.reply_text("\n".join(lines))
+
+
+# ===================== KANAL ADMIN HANDLERLAR =====================
+
+async def admin_add_channel(update, context):
+    """
+    /addchannel <link>  — public kanal
+    /addchannel <link> <channel_id>  — private kanal
+    """
+    remember_user(update)
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "📢 Kanal qo'shish:\n\n"
+            "Public kanal:\n"
+            "  /addchannel https://t.me/kanal_username\n\n"
+            "Private kanal (invite link):\n"
+            "  /addchannel https://t.me/+InviteLink -1001234567890\n\n"
+            "⚠️ Bot kanalning ADMINISTRATORI bo'lishi shart!\n"
+            "Kanal ID sini bilish uchun @userinfobot ga forward qiling."
+        )
+        return
+
+    link = context.args[0].strip()
+
+    # Link formatini tekshirish
+    if not (link.startswith("https://t.me/") or link.startswith("http://t.me/")):
+        await update.message.reply_text(
+            "❌ Noto'g'ri link. t.me linki bo'lishi kerak.\n"
+            "Misol: https://t.me/kanal_username"
+        )
+        return
+
+    processing_msg = await update.message.reply_text("⏳ Kanal tekshirilmoqda...")
+
+    # Private kanal (2 ta argument)
+    if len(context.args) >= 2:
+        channel_id_str = context.args[1].strip()
+        try:
+            channel_id = int(channel_id_str)
+        except ValueError:
+            await processing_msg.edit_text("❌ Kanal ID raqam bo'lishi kerak. Misol: -1001234567890")
+            return
+
+        try:
+            chat = await context.bot.get_chat(channel_id)
+            title = chat.title or str(channel_id)
+        except Exception as e:
+            await processing_msg.edit_text(
+                f"❌ Kanal topilmadi: {e}\n\n"
+                "Bot kanal admini bo'lishi shart!"
+            )
+            return
+
+        try:
+            add_required_channel(link, channel_id, title)
+        except Exception:
+            await processing_msg.edit_text("❌ Bazaga saqlashda xato yuz berdi.")
+            return
+
+        await processing_msg.edit_text(
+            f"✅ Kanal qo'shildi!\n\n"
+            f"📢 Nom: {title}\n"
+            f"🆔 ID: {channel_id}\n"
+            f"🔗 Link: {link}"
+        )
+        return
+
+    # Public kanal (1 ta argument)
+    if "/+" in link:
+        await processing_msg.edit_text(
+            "⚠️ Private invite link uchun kanal ID sini ham yozing:\n\n"
+            "/addchannel https://t.me/+InviteLink -1001234567890\n\n"
+            "Kanal ID sini bilish:\n"
+            "1. Botni kanalga admin qiling\n"
+            "2. Kanalga biror xabar yuboring\n"
+            "3. @userinfobot ga forward qiling"
+        )
+        return
+
+    try:
+        username = link.rstrip("/").split("/")[-1]
+        if not username.startswith("@"):
+            username = "@" + username
+        chat = await context.bot.get_chat(username)
+        channel_id = chat.id
+        title = chat.title or username
+
+        add_required_channel(link, channel_id, title)
+
+        await processing_msg.edit_text(
+            f"✅ Kanal qo'shildi!\n\n"
+            f"📢 Nom: {title}\n"
+            f"🆔 ID: {channel_id}\n"
+            f"🔗 Link: {link}\n\n"
+            f"Foydalanuvchilar endi bu kanalga obuna bo'lishi shart."
+        )
+    except Exception as e:
+        await processing_msg.edit_text(
+            f"❌ Xato: {e}\n\n"
+            "Bot kanalning administratori bo'lishi shart!\n"
+            "Botni kanalga admin qilib, qayta urinib ko'ring."
+        )
+
+
+async def admin_remove_channel(update, context):
+    """/removechannel — kanallar ro'yxatini ko'rsatib, o'chirish tugmalarini beradi"""
+    remember_user(update)
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+
+    try:
+        channels = get_all_required_channels()
+    except Exception:
+        await reply_service_unavailable(update)
+        return
+
+    if not channels:
+        await update.message.reply_text(
+            "Hali majburiy kanal qo'shilmagan.\n\n"
+            "Kanal qo'shish: /addchannel <link>"
+        )
+        return
+
+    lines = ["📋 Majburiy kanallar ro'yxati:\n"]
+    for i, ch in enumerate(channels, 1):
+        join_count = ch.get("join_count", 0)
+        lines.append(f"{i}. {ch.get('title', '-')} — {join_count} ta kirish")
+
+    buttons = []
+    for ch in channels:
+        buttons.append([
+            InlineKeyboardButton(
+                f"🗑 {ch.get('title', str(ch['channel_id']))} ni o'chirish",
+                callback_data=f"rmchannel:{ch['channel_id']}",
+            )
+        ])
+    buttons.append([InlineKeyboardButton("❌ Bekor", callback_data="rmchannel:cancel")])
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def admin_remove_channel_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    action = query.data.split(":", 1)[1]
+
+    if action == "cancel":
+        await query.message.edit_reply_markup(reply_markup=None)
+        return
+
+    try:
+        channel_id = int(action)
+    except ValueError:
+        return
+
+    try:
+        channels = get_all_required_channels()
+        title = next(
+            (ch.get("title", str(channel_id)) for ch in channels if ch["channel_id"] == channel_id),
+            str(channel_id)
+        )
+        remove_required_channel(channel_id)
+    except Exception:
+        await query.message.edit_reply_markup(reply_markup=None)
+        await query.message.reply_text("❌ O'chirishda xato yuz berdi.")
+        return
+
+    await query.message.edit_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        f"✅ '{title}' kanali ro'yxatdan o'chirildi.",
+        reply_markup=get_admin_menu_keyboard(),
+    )
+
+
+async def admin_channels_stat(update, context):
+    """/kanallar — har bir kanal uchun bot orqali kirganlar soni"""
+    remember_user(update)
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+
+    try:
+        channels = get_all_required_channels()
+    except Exception:
+        await reply_service_unavailable(update)
+        return
+
+    if not channels:
+        await update.message.reply_text(
+            "Hali majburiy kanal qo'shilmagan.\n\n"
+            "Kanal qo'shish: /addchannel <link>"
+        )
+        return
+
+    lines = ["📊 Kanallar statistikasi:\n"]
+    total_joins = 0
+    for i, ch in enumerate(channels, 1):
+        join_count = ch.get("join_count", 0)
+        total_joins += join_count
+        title = ch.get("title", "-")
+        link = ch.get("link", "-")
+        lines.append(
+            f"{i}. 📢 {title}\n"
+            f"   🔗 {link}\n"
+            f"   👥 Bot orqali kirdi: {join_count} ta\n"
+        )
+
+    lines.append("─────────────────")
+    lines.append(f"Jami bot orqali kirdi: {total_joins} ta")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def handle_check_subscription_callback(update, context):
+    """Foydalanuvchi 'Obuna bo'ldim' tugmasini bosganda"""
+    remember_user(update)
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    bot = context.bot
+
+    is_subscribed, not_subscribed = await check_user_subscribed(bot, user_id)
+
+    if is_subscribed:
+        await query.message.edit_reply_markup(reply_markup=None)
+        await query.message.reply_text(
+            "✅ Rahmat! Obuna tasdiqlandi.\n\n"
+            "Endi kino kodini yuboring."
+        )
+    else:
+        try:
+            await query.message.edit_reply_markup(
+                reply_markup=get_subscribe_keyboard(not_subscribed)
+            )
+        except Exception:
+            pass
+        await query.answer("⚠️ Siz hali barcha kanallarga obuna bo'lmadingiz!", show_alert=True)
+
+
+async def handle_channel_join_update(update, context):
+    """Kanal a'zoligi o'zgarganda join_count ni oshiradi"""
+    if update.chat_member is None:
+        return
+
+    new_member = update.chat_member.new_chat_member
+    old_member = update.chat_member.old_chat_member
+
+    was_member = old_member.status in ("member", "administrator", "creator")
+    is_member = new_member.status in ("member", "administrator", "creator")
+
+    if not was_member and is_member:
+        channel_id = update.chat_member.chat.id
+        increment_channel_join_count(channel_id)
 
 
 # ===================== CALLBACKS =====================
@@ -2459,6 +2689,7 @@ async def handle_message(update, context):
     text = update.message.text.strip()
 
     if user_id != ADMIN_ID:
+        # Verification tekshiruvi
         started_at = get_user_started_at(user_id)
         if started_at is None:
             await update.message.reply_text(
@@ -2466,18 +2697,21 @@ async def handle_message(update, context):
                 "⬇️ Tugmani bosing:",
                 reply_markup=get_verification_keyboard(),
             )
-            await update.message.reply_text(
-                "⏳ Start bosgandan so'ng 10 soniya kuting va qayta yuboring."
-            )
+            await update.message.reply_text("⏳ Start bosgandan so'ng 10 soniya kuting va qayta yuboring.")
             return
 
         elapsed = int(time.time()) - started_at
         if elapsed < VERIFICATION_WAIT_SECONDS:
             remaining = VERIFICATION_WAIT_SECONDS - elapsed
-            await update.message.reply_text(
-                f"⏳ Iltimos, yana {remaining} soniya kuting va qayta yuboring."
-            )
+            await update.message.reply_text(f"⏳ Iltimos, yana {remaining} soniya kuting va qayta yuboring.")
             return
+
+        # ---- KANAL OBUNA TEKSHIRUVI ----
+        is_subscribed, not_subscribed = await check_user_subscribed(context.bot, user_id)
+        if not is_subscribed:
+            await send_subscribe_required_message(update.message, not_subscribed)
+            return
+        # ---- KANAL OBUNA TEKSHIRUVI TUGADI ----
 
     if not text.isdigit():
         await update.message.reply_text("Kino kodini yozing.")
@@ -2633,17 +2867,29 @@ def build_application():
     app.add_handler(CommandHandler("stat", admin_stat))
     app.add_handler(CommandHandler("ochirish", admin_delete_menu))
 
+    # Kanal boshqaruvi commandlar
+    app.add_handler(CommandHandler("addchannel", admin_add_channel))
+    app.add_handler(CommandHandler("removechannel", admin_remove_channel))
+    app.add_handler(CommandHandler("kanallar", admin_channels_stat))
+
     # Conversation handlerlar
     app.add_handler(conv)
     app.add_handler(edit_conv)
     app.add_handler(jild_conv)
     app.add_handler(broadcast_conv)
 
-    # Callback handlerlar
+    # Kanal callback handlerlar
+    app.add_handler(CallbackQueryHandler(handle_check_subscription_callback, pattern="^check_subscription$"))
+    app.add_handler(CallbackQueryHandler(admin_remove_channel_callback, pattern="^rmchannel:"))
+
+    # Boshqa callback handlerlar
     app.add_handler(CallbackQueryHandler(handle_series_part_callback, pattern=f"^{SERIES_CALLBACK_PREFIX}"))
     app.add_handler(CallbackQueryHandler(handle_favorite_callback, pattern="^fav:"))
     app.add_handler(CallbackQueryHandler(admin_broadcast_stop_callback, pattern="^stop_broadcast$"))
     app.add_handler(CallbackQueryHandler(admin_delete_bc_callback, pattern="^del_bc:"))
+
+    # Kanal join tracking (ChatMemberHandler)
+    app.add_handler(ChatMemberHandler(handle_channel_join_update, ChatMemberHandler.CHAT_MEMBER))
 
     # Oxirgi handlerlar
     app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
@@ -2659,7 +2905,10 @@ def run_bot_forever():
             app = build_application()
             logger.info("Bot ishga tushdi...")
             set_health_state(bot="running", last_error="")
-            app.run_polling(bootstrap_retries=-1)
+            app.run_polling(
+                bootstrap_retries=-1,
+                allowed_updates=["message", "callback_query", "chat_member"],
+            )
             logger.warning("Polling to'xtadi. 5 soniyadan keyin qayta ishga tushadi.")
             set_health_state(bot="stopped")
         except Exception as exc:
