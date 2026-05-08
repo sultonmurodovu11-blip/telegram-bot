@@ -572,6 +572,9 @@ def get_user_started_at(user_id):
 
 
 def get_verification_keyboard():
+    # VERIFICATION_BOT_URL bo'sh bo'lsa None qaytaradi — xato bermaslik uchun
+    if not VERIFICATION_BOT_URL:
+        return None
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("✅ Botga o'tish", url=VERIFICATION_BOT_URL)]]
     )
@@ -604,10 +607,8 @@ async def check_user_subscribed(bot, user_id: int):
 
 
 def get_subscribe_keyboard(not_subscribed_channels: list):
-    """Har bir kanal uchun tugma + 'Obuna bo'ldim' tugmasi"""
     rows = []
     for ch in not_subscribed_channels:
-        # button_title bo'lsa — uni ishlatamiz, bo'lmasa title
         btn_label = ch.get("button_title") or ch.get("title") or "Kanalga o'tish"
         rows.append([
             InlineKeyboardButton(
@@ -961,6 +962,7 @@ async def start(update, context):
     remember_user(update)
     user_id = update.message.from_user.id
 
+    # Admin uchun
     if user_id == ADMIN_ID:
         await update.message.reply_text(
             "Salom Admin! Movie HD botiga xush kelibsiz!\n\n"
@@ -969,21 +971,32 @@ async def start(update, context):
         )
         return
 
+    # Foydalanuvchi uchun started_at saqlash
     try:
         mark_user_started(user_id)
     except Exception:
         logger.exception("Foydalanuvchi started_at ni saqlashda xato")
 
-    await update.message.reply_text(
-        "🎬 Salom! Movie HD botiga xush kelibsiz!\n\n"
-        "✅ Botdan foydalanish uchun quyidagi botga o'ting va /start bosing:\n\n"
-        "⬇️ Tugmani bosing va start bosing:",
-        reply_markup=get_verification_keyboard(),
-    )
-    await update.message.reply_text(
-        "⏳ Start bosgandan so'ng 10 soniya kuting va qayta urining.\n\n"
-        "✅ Shundan so'ng bu yerga kino kodini yuboring!"
-    )
+    # VERIFICATION_BOT_URL mavjud bo'lsa — verification xabar yuborish
+    if VERIFICATION_BOT_URL:
+        keyboard = get_verification_keyboard()
+        await update.message.reply_text(
+            "🎬 Salom! Movie HD botiga xush kelibsiz!\n\n"
+            "✅ Botdan foydalanish uchun quyidagi botga o'ting va /start bosing:\n\n"
+            "⬇️ Tugmani bosing va start bosing:",
+            reply_markup=keyboard,
+        )
+        await update.message.reply_text(
+            f"⏳ Start bosgandan so'ng {VERIFICATION_WAIT_SECONDS} soniya kuting va "
+            "shu yerga kino kodini yuboring!"
+        )
+    else:
+        # VERIFICATION_BOT_URL yo'q bo'lsa — to'g'ridan-to'g'ri xush kelibsiz xabari
+        await update.message.reply_text(
+            "🎬 Salom! Movie HD botiga xush kelibsiz!\n\n"
+            "✅ Kino kodini yuboring va filmni oling!\n\n"
+            "Masalan: 1 yoki 25 yoki 100"
+        )
 
 
 async def unknown_command(update, context):
@@ -2236,11 +2249,6 @@ async def list_series_ranges(update, context):
 # ===================== KANAL ADMIN HANDLERLAR =====================
 
 async def admin_add_channel(update, context):
-    """
-    /addchannel <link>           — public kanal
-    /addchannel <link> <id>      — private kanal
-    Keyin tugma nomini so'raydi.
-    """
     remember_user(update)
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
@@ -2295,7 +2303,6 @@ async def addch_get_title(update, context):
 
     processing_msg = await update.message.reply_text("⏳ Kanal tekshirilmoqda...")
 
-    # Private kanal
     if channel_id_arg:
         try:
             channel_id = int(channel_id_arg)
@@ -2327,7 +2334,6 @@ async def addch_get_title(update, context):
         )
         return ConversationHandler.END
 
-    # Public kanal — private invite link tekshiruvi
     if "/+" in link:
         await processing_msg.edit_text(
             "⚠️ Private invite link uchun kanal ID sini ham yozing:\n\n"
@@ -2365,7 +2371,6 @@ async def addch_get_title(update, context):
 
 
 async def admin_remove_channel(update, context):
-    """/removechannel — kanallar ro'yxatini ko'rsatib, o'chirish tugmalarini beradi"""
     remember_user(update)
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
@@ -2443,7 +2448,6 @@ async def admin_remove_channel_callback(update, context):
 
 
 async def admin_channels_stat(update, context):
-    """/kanallar — har bir kanal uchun bot orqali kirganlar soni"""
     remember_user(update)
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
@@ -2484,7 +2488,6 @@ async def admin_channels_stat(update, context):
 
 
 async def handle_check_subscription_callback(update, context):
-    """Foydalanuvchi 'Obuna bo'ldim' tugmasini bosganda"""
     remember_user(update)
     query = update.callback_query
     await query.answer()
@@ -2511,7 +2514,6 @@ async def handle_check_subscription_callback(update, context):
 
 
 async def handle_channel_join_update(update, context):
-    """Kanal a'zoligi o'zgarganda join_count ni oshiradi"""
     if update.chat_member is None:
         return
 
@@ -2716,29 +2718,33 @@ async def handle_message(update, context):
     text = update.message.text.strip()
 
     if user_id != ADMIN_ID:
-        # Verification tekshiruvi
-        started_at = get_user_started_at(user_id)
-        if started_at is None:
-            await update.message.reply_text(
-                "⚠️ Botdan foydalanish uchun avval quyidagi botga o'ting va /start bosing:\n\n"
-                "⬇️ Tugmani bosing:",
-                reply_markup=get_verification_keyboard(),
-            )
-            await update.message.reply_text("⏳ Start bosgandan so'ng 10 soniya kuting va qayta yuboring.")
-            return
+        # Verification tekshiruvi — faqat VERIFICATION_BOT_URL mavjud bo'lsa
+        if VERIFICATION_BOT_URL:
+            started_at = get_user_started_at(user_id)
+            if started_at is None:
+                await update.message.reply_text(
+                    "⚠️ Botdan foydalanish uchun avval quyidagi botga o'ting va /start bosing:\n\n"
+                    "⬇️ Tugmani bosing:",
+                    reply_markup=get_verification_keyboard(),
+                )
+                await update.message.reply_text(
+                    f"⏳ Start bosgandan so'ng {VERIFICATION_WAIT_SECONDS} soniya kuting va qayta yuboring."
+                )
+                return
 
-        elapsed = int(time.time()) - started_at
-        if elapsed < VERIFICATION_WAIT_SECONDS:
-            remaining = VERIFICATION_WAIT_SECONDS - elapsed
-            await update.message.reply_text(f"⏳ Iltimos, yana {remaining} soniya kuting va qayta yuboring.")
-            return
+            elapsed = int(time.time()) - started_at
+            if elapsed < VERIFICATION_WAIT_SECONDS:
+                remaining = VERIFICATION_WAIT_SECONDS - elapsed
+                await update.message.reply_text(
+                    f"⏳ Iltimos, yana {remaining} soniya kuting va qayta yuboring."
+                )
+                return
 
-        # ---- KANAL OBUNA TEKSHIRUVI ----
+        # Kanal obuna tekshiruvi
         is_subscribed, not_subscribed = await check_user_subscribed(context.bot, user_id)
         if not is_subscribed:
             await send_subscribe_required_message(update.message, not_subscribed)
             return
-        # ---- KANAL OBUNA TEKSHIRUVI TUGADI ----
 
     if not text.isdigit():
         await update.message.reply_text("Kino kodini yozing.")
@@ -2925,7 +2931,7 @@ def build_application():
     app.add_handler(CallbackQueryHandler(admin_broadcast_stop_callback, pattern="^stop_broadcast$"))
     app.add_handler(CallbackQueryHandler(admin_delete_bc_callback, pattern="^del_bc:"))
 
-    # Kanal join tracking (ChatMemberHandler)
+    # Kanal join tracking
     app.add_handler(ChatMemberHandler(handle_channel_join_update, ChatMemberHandler.CHAT_MEMBER))
 
     # Oxirgi handlerlar
