@@ -54,6 +54,11 @@ SEARCH_RESULTS_LIMIT = 10
 LIST_PAGE_SIZE = 20
 ADMIN_LIST_PAGE_CALLBACK = "adminlistpage:"
 
+# ===================== YANGI: /barchasi (faqat admin) =====================
+ADMIN_BARCHASI_PAGE_SIZE = 50
+ADMIN_BARCHASI_CALLBACK = "abp:"
+# =========================================================================
+
 
 def ensure_telegram_imports():
     global ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes
@@ -370,6 +375,7 @@ def increment_view_count(code):
 # ===================== QIDIRISH DB =====================
 
 def search_movies_by_name(query: str, limit: int = SEARCH_RESULTS_LIMIT):
+    """Eski funksiya — inline query uchun saqlab qolindi."""
     if not query or len(query) < 2:
         return []
 
@@ -386,6 +392,40 @@ def search_movies_by_name(query: str, limit: int = SEARCH_RESULTS_LIMIT):
         return run_db(operation)
     except Exception:
         logger.exception("Qidirishda xato yuz berdi")
+        return []
+
+
+def search_movies_partial(query: str, limit: int = 50):
+    """
+    YouTube uslubida qidirish.
+    'ro' yozsa → Ronaldo, Roma, Robot...
+    'av tar' yozsa → Avatar (har so'z alohida AND shart)
+    To'liq yozish shart emas.
+    """
+    query = query.strip()
+    if not query or len(query) < 2:
+        return []
+
+    def operation(col):
+        import re
+        tokens = query.split()
+        and_filters = []
+        for token in tokens:
+            pattern = re.compile(re.escape(token), re.IGNORECASE)
+            and_filters.append({"nom": {"$regex": pattern}})
+
+        mongo_filter = {"$and": and_filters} if len(and_filters) > 1 else and_filters[0]
+
+        cursor = col.find(
+            mongo_filter,
+            {"_id": 0, "code": 1, "nom": 1, "sifat": 1, "til": 1, "vaqt": 1}
+        ).sort("nom", 1).limit(limit)
+        return list(cursor)
+
+    try:
+        return run_db(operation)
+    except Exception:
+        logger.exception("search_movies_partial: xato")
         return []
 
 
@@ -847,8 +887,8 @@ def get_admin_menu_keyboard():
             ["/foydalanuvchi 777", "/adminlik"],
             ["/ochirish", "/stat"],
             ["/top", "/sevimli"],
-            ["/qidirish", "/barchasi"],
-            ["/barchakino"],                   # ← YANGI: admin uchun barcha kinolar
+            ["/search", "/barchasi"],      # YANGI: /search va /barchasi
+            ["/qidirish", "/barchakino"],
             ["/help"],
         ],
         resize_keyboard=True, one_time_keyboard=False,
@@ -858,8 +898,7 @@ def get_admin_menu_keyboard():
 def get_user_menu_keyboard():
     return ReplyKeyboardMarkup(
         [
-            ["🔍 Qidirish", "📋 Barcha kinolar"],
-            ["❤️ Sevimlilar"],
+            ["🔍 Qidirish", "❤️ Sevimlilar"],
         ],
         resize_keyboard=True, one_time_keyboard=False,
     )
@@ -955,7 +994,41 @@ def build_admin_list_page_text(movies, page: int, total: int, page_size: int = L
     return "\n".join(lines)
 
 
-# ====================================================
+# ===================== YANGI: /barchasi TUGMALARI (faqat admin) =====================
+
+def build_admin_barchasi_text(movies, page: int, total: int, page_size: int = ADMIN_BARCHASI_PAGE_SIZE):
+    """
+    Har bir qator: KOD  NOM
+    Uzun nomlar qisqartirilmaydi — to'liq ko'rsatiladi.
+    """
+    total_pages = (total + page_size - 1) // page_size
+    start = page * page_size + 1
+    lines = [
+        f"📋 <b>Barcha kinolar</b>  •  {page + 1}/{total_pages} sahifa",
+        f"<i>Jami: {total} ta  •  {start}–{start + len(movies) - 1}</i>",
+        "─────────────────────",
+    ]
+    for movie in movies:
+        code = movie.get("code", "-")
+        nom = escape_html(movie.get("nom", "-"))
+        lines.append(f"<code>{code}</code>  {nom}")
+    lines.append("─────────────────────")
+    lines.append("Kino olish uchun kodini yuboring.")
+    return "\n".join(lines)
+
+
+def build_admin_barchasi_keyboard(page: int, total: int, page_size: int = ADMIN_BARCHASI_PAGE_SIZE):
+    total_pages = (total + page_size - 1) // page_size
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Oldingi", callback_data=f"{ADMIN_BARCHASI_CALLBACK}{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
+    if page + 1 < total_pages:
+        nav.append(InlineKeyboardButton("Keyingi ➡️", callback_data=f"{ADMIN_BARCHASI_CALLBACK}{page + 1}"))
+    return InlineKeyboardMarkup([nav])
+
+# ======================================================================================
+
 
 def parse_codes_input(raw_value):
     normalized = raw_value.replace(",", " ").replace(";", " ").replace("\n", " ").strip()
@@ -1013,6 +1086,7 @@ JILD_CODES, JILD_NAME = range(14, 16)
 BC_GET_TEXT, BC_GET_MEDIA, BC_ASK_BUTTON, BC_GET_URL, BC_GET_BTN_NAME, BC_CONFIRM = range(16, 22)
 ADDCH_GET_TITLE = 22
 SEARCH_STATE = 23
+SEARCH_CMD_STATE = 30   # /search buyrug'i uchun yangi state
 
 
 async def log_error(update: object, context):
@@ -1061,8 +1135,7 @@ async def start(update, context):
         await update.message.reply_text(
             "🎬 Salom! Movie HD botiga xush kelibsiz!\n\n"
             "✅ Kino kodini yuboring va filmni oling!\n\n"
-            "🔍 Kino nomini qidirish: /qidirish\n"
-            "📋 Barcha kinolar: /barchasi\n"
+            "🔍 Kino nomini qidirish: /search\n"
             "❤️ Sevimlilar: /sevimli\n\n"
             "Masalan: 1 yoki 25 yoki 100",
             reply_markup=get_user_menu_keyboard(),
@@ -1085,7 +1158,97 @@ def seconds_to_hhmmss(seconds: int) -> str:
         return f"{minutes}:{secs:02d}"
 
 
-# ===================== QIDIRISH HANDLERLARI =====================
+# ===================== YANGI: /search HANDLER =====================
+
+async def cmd_search_start(update, context):
+    """
+    /search — admin ham, foydalanuvchi ham ishlatadi.
+    YouTube uslubida: to'liq yozish shart emas.
+    """
+    remember_user(update)
+    user_id = update.effective_user.id
+
+    if user_id != ADMIN_ID:
+        try:
+            is_subscribed, not_subscribed = await check_user_subscribed(context.bot, user_id)
+            if not is_subscribed:
+                await send_subscribe_required_message(update.message, not_subscribed)
+                return ConversationHandler.END
+        except Exception:
+            pass
+
+    await update.message.reply_text(
+        "🔍 <b>Kino qidirish</b>\n\n"
+        "Kino nomini yozing — to'liq yozish shart emas.\n"
+        "Masalan: <code>ro</code> → Ronaldo, Roma, Robot...\n"
+        "Masalan: <code>av tar</code> → Avatar\n\n"
+        "Bekor qilish: /cancel",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup(
+            [["❌ Bekor qilish"]], resize_keyboard=True, one_time_keyboard=True
+        ),
+    )
+    return SEARCH_CMD_STATE
+
+
+async def cmd_search_handle(update, context):
+    """
+    Foydalanuvchi so'z yozadi — YouTube uslubida partial qidirish.
+    """
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+
+    if text in ("❌ Bekor qilish", "/cancel"):
+        kb = get_admin_menu_keyboard() if user_id == ADMIN_ID else get_user_menu_keyboard()
+        await update.message.reply_text("❌ Bekor qilindi.", reply_markup=kb)
+        return ConversationHandler.END
+
+    if len(text) < 2:
+        await update.message.reply_text(
+            "⚠️ Kamida 2 ta harf yozing:",
+            reply_markup=ReplyKeyboardMarkup(
+                [["❌ Bekor qilish"]], resize_keyboard=True, one_time_keyboard=True
+            ),
+        )
+        return SEARCH_CMD_STATE
+
+    try:
+        results = search_movies_partial(text, limit=50)
+    except Exception:
+        logger.exception("cmd_search_handle: qidirishda xato")
+        await update.message.reply_text(SERVICE_UNAVAILABLE_TEXT)
+        return SEARCH_CMD_STATE
+
+    if not results:
+        await update.message.reply_text(
+            f"❌ <b>«{escape_html(text)}»</b> bo'yicha hech narsa topilmadi.\n\n"
+            "Boshqa so'z bilan urinib ko'ring:",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardMarkup(
+                [["❌ Bekor qilish"]], resize_keyboard=True, one_time_keyboard=True
+            ),
+        )
+        return SEARCH_CMD_STATE
+
+    lines = [f"🔍 <b>«{escape_html(text)}»</b> — {len(results)} ta natija:\n"]
+    for movie in results:
+        nom = escape_html(movie.get("nom", "-"))
+        code = movie.get("code", "-")
+        lines.append(f"• {nom}  <code>{code}</code>")
+    lines.append("\n👆 Tugmani bosing yoki kodini yuboring.")
+
+    keyboard = build_search_results_keyboard(results)
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+    return SEARCH_CMD_STATE
+
+# ==================================================================
+
+
+# ===================== ESKI QIDIRISH HANDLERLARI (/qidirish) =====================
 
 async def search_start(update, context):
     remember_user(update)
@@ -1245,11 +1408,6 @@ async def handle_list_page_callback(update, context):
 # ===================== BARCHA KINOLAR (admin /barchakino) =====================
 
 async def barchakino_admin(update, context):
-    """
-    /barchakino — faqat admin.
-    KOD | NOM formatida sahifalab chiqaradi.
-    Qidiruv inline tugmasi ham bor.
-    """
     remember_user(update)
     user_id = update.effective_user.id
     if user_id != ADMIN_ID:
@@ -1274,7 +1432,6 @@ async def barchakino_admin(update, context):
 
 
 async def handle_admin_list_page_callback(update, context):
-    """Admin /barchakino sahifalash callback."""
     query = update.callback_query
     if query is None:
         return
@@ -1305,6 +1462,79 @@ async def handle_admin_list_page_callback(update, context):
         await query.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception:
         pass
+
+
+# ===================== YANGI: /barchasi HANDLER (faqat admin) =====================
+
+async def admin_barchasi(update, context):
+    """
+    /barchasi — FAQAT ADMIN.
+    Barcha kinolar: KOD | NOM, sahifalab (50 ta/sahifa).
+    Uzun nomlar ham to'liq ko'rsatiladi — qisqartirilmaydi.
+    """
+    remember_user(update)
+    user_id = update.effective_user.id
+
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Bu buyruq faqat admin uchun.")
+        return
+
+    try:
+        total = get_total_movies_count()
+        movies = get_all_movies_sorted(skip=0, limit=ADMIN_BARCHASI_PAGE_SIZE)
+    except Exception:
+        logger.exception("admin_barchasi: kinolarni olishda xato")
+        await reply_service_unavailable(update)
+        return
+
+    if not movies:
+        await update.message.reply_text("Hali birorta kino qo'shilmagan.")
+        return
+
+    text = build_admin_barchasi_text(movies, page=0, total=total)
+    keyboard = build_admin_barchasi_keyboard(page=0, total=total)
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+
+async def handle_admin_barchasi_callback(update, context):
+    """
+    /barchasi sahifalash callback — faqat admin.
+    """
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    try:
+        page = int(query.data[len(ADMIN_BARCHASI_CALLBACK):])
+    except ValueError:
+        return
+
+    try:
+        total = get_total_movies_count()
+        movies = get_all_movies_sorted(
+            skip=page * ADMIN_BARCHASI_PAGE_SIZE,
+            limit=ADMIN_BARCHASI_PAGE_SIZE,
+        )
+    except Exception:
+        await query.answer(SERVICE_UNAVAILABLE_TEXT, show_alert=True)
+        return
+
+    if not movies:
+        await query.answer("Bu sahifada kinolar topilmadi.", show_alert=True)
+        return
+
+    text = build_admin_barchasi_text(movies, page=page, total=total)
+    keyboard = build_admin_barchasi_keyboard(page=page, total=total)
+    try:
+        await query.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    except Exception:
+        pass
+
+# ==================================================================================
 
 
 # ===================== INLINE QIDIRISH =====================
@@ -1883,9 +2113,10 @@ async def admin_help(update, context):
         "  /stat\n"
         "  /top\n\n"
         "Qidirish va ro'yxat:\n"
-        "  /qidirish — kino nomini qidirish\n"
-        "  /barchasi — barcha kinolar (foydalanuvchi)\n"
-        "  /barchakino — barcha kinolar (admin, kod|nom)\n\n"
+        "  /search — YouTube uslubida qidirish (admin+user)\n"
+        "  /barchasi — barcha kinolar FAQAT ADMIN (50 ta/sahifa)\n"
+        "  /qidirish — eski qidirish (to'liq nom)\n"
+        "  /barchakino — barcha kinolar (admin, inline)\n\n"
         "Ommaviy xabar:\n"
         "  /adminlik — xabar yuborish\n"
         "  /ochirish — xabarlarni o'chirish\n\n"
@@ -2443,23 +2674,40 @@ async def edit_get_vaqt(update, context):
     return ConversationHandler.END
 
 
-# ===================== main() — HANDLER QO'SHISH ESLATMASI =====================
-# main() funksiyangizda quyidagilarni qo'shing (mavjud handlerlarga QO'SHIMCHA):
+# =====================================================================
+# main() FUNKSIYASIGA QO'SHISH KERAK BO'LGAN HANDLERLAR
+# =====================================================================
 #
+# /search uchun ConversationHandler (boshqalardan OLDIN qo'shing):
+#
+#   search_cmd_conv = ConversationHandler(
+#       entry_points=[CommandHandler("search", cmd_search_start)],
+#       states={
+#           SEARCH_CMD_STATE: [
+#               MessageHandler(filters.TEXT & ~filters.COMMAND, cmd_search_handle),
+#           ],
+#       },
+#       fallbacks=[CommandHandler("cancel", cancel)],
+#       allow_reentry=True,
+#   )
+#   application.add_handler(search_cmd_conv)
+#
+#
+# /barchasi uchun (faqat admin):
+#
+#   application.add_handler(CommandHandler("barchasi", admin_barchasi))
+#
+#   application.add_handler(CallbackQueryHandler(
+#       handle_admin_barchasi_callback,
+#       pattern=r"^abp:"
+#   ))
+#
+#
+# /barchakino uchun (mavjud):
 #   application.add_handler(CommandHandler("barchakino", barchakino_admin))
-#
 #   application.add_handler(CallbackQueryHandler(
 #       handle_admin_list_page_callback,
 #       pattern="^adminlistpage:"
 #   ))
 #
-#   application.add_handler(MessageHandler(
-#       filters.Text(["📋 Barcha kinolar"]),
-#       show_all_movies
-#   ))
-#
-#   application.add_handler(MessageHandler(
-#       filters.Text(["🔍 Qidirish"]),
-#       search_start
-#   ))
-# ============================================================================
+# =====================================================================
