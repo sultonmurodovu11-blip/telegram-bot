@@ -90,8 +90,6 @@ def escape_html(text: str) -> str:
 
 
 MONGO_URL = os.environ.get("MONGO_URL", "").strip()
-
-# --- MUHIM O'ZGARISH: global client bitta, yopilinmaydi ---
 client = None
 db = None
 movies_col = None
@@ -99,12 +97,7 @@ series_col = None
 folders_col = None
 users_col = None
 channels_col = None
-
-# Qayta ulanish uchun cooldown (soniyalarda)
-_last_reconnect_attempt = 0
-_RECONNECT_COOLDOWN = 10  # 10 soniya kutish
-
-SERVICE_UNAVAILABLE_TEXT = "⚠️ Vaqtinchalik texnik nosozlik. Iltimos, bir oz kutib qayta yuboring."
+SERVICE_UNAVAILABLE_TEXT = "Bot Sozlanmoqda Keyinroq Urunib ko'ring"
 DEFAULT_SIFAT = os.environ.get("DEFAULT_SIFAT", "720p").strip() or "720p"
 DEFAULT_TIL = os.environ.get("DEFAULT_TIL", "O'zbek").strip() or "O'zbek"
 DEFAULT_VAQT = os.environ.get("DEFAULT_VAQT", "-").strip() or "-"
@@ -129,102 +122,69 @@ _broadcast_status_message_id = None
 _admin_sent_messages = {}
 
 
-def _init_db_client():
-    """MongoDB clientni bir marta ishga tushiradi (connection pool bilan)."""
+def reset_db_connection():
     global client, db, movies_col, series_col, folders_col, users_col, channels_col
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            pass
+    client = None
+    db = None
+    movies_col = None
+    series_col = None
+    folders_col = None
+    users_col = None
+    channels_col = None
+    set_health_state(db="disconnected")
+
+
+def get_movies_col():
+    global client, db, movies_col, series_col, folders_col, users_col, channels_col
+    if movies_col is not None:
+        return movies_col
     ensure_pymongo_imports()
     if not MONGO_URL:
         set_health_state(db="error", last_error="MONGO_URL topilmadi")
         raise RuntimeError("MONGO_URL topilmadi. Environment variable sifatida sozlang.")
-
-    client = MongoClient(
-        MONGO_URL,
-        # Connection pool sozlamalari — serverga ko'p qayta ulanmaslik uchun
-        maxPoolSize=10,
-        minPoolSize=1,
-        maxIdleTimeMS=30000,
-        serverSelectionTimeoutMS=8000,
-        connectTimeoutMS=8000,
-        socketTimeoutMS=15000,
-        # Avtomatik qayta ulanish
-        retryWrites=True,
-        retryReads=True,
-    )
-    db = client["moviebot"]
-    movies_col = db["movies"]
-    series_col = db["series_groups"]
-    folders_col = db["movie_folders"]
-    users_col = db["users"]
-    channels_col = db["required_channels"]
-    logger.info("MongoDB connection pool yaratildi.")
-
-
-def _ensure_db_connected():
-    """
-    DB ulanishini tekshiradi. Uzilgan bo'lsa — qayta ulashga harakat qiladi.
-    Cooldown davomida esa xato otadi (foydalanuvchiga spam bo'lmasin).
-    """
-    global client, _last_reconnect_attempt
-    if client is not None:
-        try:
-            client.admin.command("ping")
-            set_health_state(db="connected", last_error="")
-            return
-        except Exception as e:
-            logger.warning(f"MongoDB ping xatosi: {e}. Qayta ulanish...")
-
-    # Cooldown tekshiruvi
-    now = time.time()
-    if now - _last_reconnect_attempt < _RECONNECT_COOLDOWN:
-        raise RuntimeError("MongoDB vaqtinchalik mavjud emas. Qayta ulanish kuting.")
-
-    _last_reconnect_attempt = now
     try:
-        _init_db_client()
-        # Ulanishni tekshirish
+        client = MongoClient(
+            MONGO_URL,
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=5000,
+            socketTimeoutMS=5000,
+        )
         client.admin.command("ping")
+        db = client["moviebot"]
+        movies_col = db["movies"]
+        series_col = db["series_groups"]
+        folders_col = db["movie_folders"]
+        users_col = db["users"]
+        channels_col = db["required_channels"]
         set_health_state(db="connected", last_error="")
-        logger.info("MongoDB qayta ulandi.")
+        return movies_col
     except Exception as exc:
-        client = None
+        reset_db_connection()
         set_health_state(db="error", last_error=f"MongoDB: {exc}")
-        raise RuntimeError(f"MongoDB ulanmadi: {exc}") from exc
-
-
-def get_movies_col():
-    _ensure_db_connected()
-    return movies_col
-
-
-def get_users_col():
-    _ensure_db_connected()
-    return users_col
-
-
-def get_series_col():
-    _ensure_db_connected()
-    return series_col
-
-
-def get_folders_col():
-    _ensure_db_connected()
-    return folders_col
-
-
-def get_channels_col():
-    _ensure_db_connected()
-    return channels_col
+        raise
 
 
 def run_db(operation):
-    """Movies kolleksiyasida operatsiya bajaradi."""
     col = get_movies_col()
     try:
         return operation(col)
     except PyMongoError as exc:
-        logger.error(f"MongoDB movies xatosi: {exc}")
+        reset_db_connection()
         set_health_state(db="error", last_error=f"MongoDB: {exc}")
         raise
+
+
+def get_users_col():
+    global users_col
+    if users_col is not None:
+        return users_col
+    get_movies_col()
+    return users_col
 
 
 def run_users_db(operation):
@@ -232,9 +192,17 @@ def run_users_db(operation):
     try:
         return operation(col)
     except PyMongoError as exc:
-        logger.error(f"MongoDB users xatosi: {exc}")
+        reset_db_connection()
         set_health_state(db="error", last_error=f"MongoDB: {exc}")
         raise
+
+
+def get_series_col():
+    global series_col
+    if series_col is not None:
+        return series_col
+    get_movies_col()
+    return series_col
 
 
 def run_series_db(operation):
@@ -242,9 +210,17 @@ def run_series_db(operation):
     try:
         return operation(col)
     except PyMongoError as exc:
-        logger.error(f"MongoDB series xatosi: {exc}")
+        reset_db_connection()
         set_health_state(db="error", last_error=f"MongoDB: {exc}")
         raise
+
+
+def get_folders_col():
+    global folders_col
+    if folders_col is not None:
+        return folders_col
+    get_movies_col()
+    return folders_col
 
 
 def run_folders_db(operation):
@@ -252,9 +228,19 @@ def run_folders_db(operation):
     try:
         return operation(col)
     except PyMongoError as exc:
-        logger.error(f"MongoDB folders xatosi: {exc}")
+        reset_db_connection()
         set_health_state(db="error", last_error=f"MongoDB: {exc}")
         raise
+
+
+# ===================== KANAL DB FUNKSIYALARI =====================
+
+def get_channels_col():
+    global channels_col
+    if channels_col is not None:
+        return channels_col
+    get_movies_col()
+    return channels_col
 
 
 def run_channels_db(operation):
@@ -262,12 +248,10 @@ def run_channels_db(operation):
     try:
         return operation(col)
     except PyMongoError as exc:
-        logger.error(f"MongoDB channels xatosi: {exc}")
+        reset_db_connection()
         set_health_state(db="error", last_error=f"MongoDB: {exc}")
         raise
 
-
-# ===================== KANAL DB FUNKSIYALARI =====================
 
 def get_all_required_channels():
     return run_channels_db(lambda col: list(col.find({}, {"_id": 0})))
@@ -318,7 +302,7 @@ def delete_movie_db(code):
 
 
 def movie_exists(code):
-    return run_db(lambda col: col.find_one({"code": code}, {"_id": 1}) is not None)
+    return run_db(lambda col: col.find_one({"code": code}) is not None)
 
 
 def get_movie_by_file_id(file_id):
@@ -349,7 +333,7 @@ def get_last_and_next_movie_code():
                     }
                 }
             },
-            {"$sort": {"code_num": -1}},
+            {"$sort": {"_id": -1}},
             {"$limit": 1},
         ]
         latest = next(col.aggregate(pipeline), None)
@@ -528,9 +512,14 @@ def get_all_user_ids():
 # ===================== QIDIRUV FUNKSIYASI =====================
 
 def search_movies_by_name(query: str, limit: int = 20):
+    """
+    Qisman mos keluvchi kinolarni qidiradi.
+    'ron' yozsа 'Ronaldo', 'Kronos' kabi kinolar chiqadi.
+    """
     if not query or not query.strip():
         return []
     query = query.strip()
+    # MongoDB regex qidiruvi — harflar tartibiga qarab qisman moslik
     regex_pattern = ".*".join(re.escape(ch) for ch in query)
     try:
         results = run_db(
@@ -547,6 +536,7 @@ def search_movies_by_name(query: str, limit: int = 20):
 
 
 def get_all_movies_list(limit: int = 500):
+    """Admin uchun barcha kinolar ro'yxati."""
     def operation(col):
         pipeline = [
             {
@@ -638,11 +628,9 @@ def get_verification_keyboard():
 # ===================== KANAL SUBSCRIPTION HELPERS =====================
 
 async def check_user_subscribed(bot, user_id: int):
-    """Foydalanuvchi barcha kanallarga obuna bo'lganini tekshiradi."""
     try:
         channels = get_all_required_channels()
     except Exception:
-        # DB xatosi bo'lsa — foydalanuvchini bloklamaymiz
         return True, []
 
     if not channels:
@@ -657,9 +645,8 @@ async def check_user_subscribed(bot, user_id: int):
             )
             if member.status in ("left", "kicked", "banned"):
                 not_subscribed.append(ch)
-        except Exception as e:
-            logger.warning(f"get_chat_member xatosi (channel {ch.get('channel_id')}): {e}")
-            # Kanal tekshirib bo'lmasa — o'tkazib yuboramiz (foydalanuvchini bloklashdan saqlaymiz)
+        except Exception:
+            pass
 
     return len(not_subscribed) == 0, not_subscribed
 
@@ -815,8 +802,7 @@ def remember_user(update):
     try:
         track_user(user)
     except Exception:
-        # Foydalanuvchini saqlash ixtiyoriy — xato bo'lsa o'tkazib yuboramiz
-        logger.warning("Foydalanuvchini saqlashda xato (o'tkazildi)")
+        logger.exception("Foydalanuvchini saqlashda xato yuz berdi")
 
 
 # ===================== TUGMALAR =====================
@@ -996,17 +982,6 @@ async def send_confirm_prompt(update, data):
     )
 
 
-async def reply_service_unavailable(update):
-    """Foydalanuvchiga yoqimli xabar — DB xatosi bo'lganda."""
-    try:
-        if update.message:
-            await update.message.reply_text(SERVICE_UNAVAILABLE_TEXT)
-        elif update.callback_query and update.callback_query.message:
-            await update.callback_query.message.reply_text(SERVICE_UNAVAILABLE_TEXT)
-    except Exception:
-        pass
-
-
 # State raqamlari
 KOD_VAQT, NOM, SIFAT, TIL, VAQT, CONFIRM, FOLDER_CHOICE, FOLDER_CREATE, FOLDER_PICK = range(9)
 EDIT_KOD, EDIT_NOM, EDIT_SIFAT, EDIT_TIL, EDIT_VAQT = range(9, 14)
@@ -1017,6 +992,13 @@ ADDCH_GET_TITLE = 22
 
 async def log_error(update: object, context):
     logger.exception("Telegram handler error", exc_info=context.error)
+
+
+async def reply_service_unavailable(update):
+    if update.message:
+        await update.message.reply_text(SERVICE_UNAVAILABLE_TEXT)
+    elif update.callback_query and update.callback_query.message:
+        await update.callback_query.message.reply_text(SERVICE_UNAVAILABLE_TEXT)
 
 
 # ===================== START =====================
@@ -1036,7 +1018,7 @@ async def start(update, context):
     try:
         mark_user_started(user_id)
     except Exception:
-        logger.warning("Foydalanuvchi started_at ni saqlashda xato (o'tkazildi)")
+        logger.exception("Foydalanuvchi started_at ni saqlashda xato")
 
     if VERIFICATION_BOT_URL:
         keyboard = get_verification_keyboard()
@@ -1673,7 +1655,10 @@ async def admin_stat(update, context):
     )
 
 
+# ===================== BARCHASI — ADMIN UCHUN =====================
+
 async def admin_all_movies(update, context):
+    """Faqat admin uchun: barcha kinolar nomi va kodi."""
     remember_user(update)
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
@@ -1698,6 +1683,7 @@ async def admin_all_movies(update, context):
 
     text = "\n".join(lines)
 
+    # Telegram 4096 belgidan uzun xabar qabul qilmaydi — bo'laklarga ajratamiz
     if len(text) <= 4096:
         await update.message.reply_text(text)
     else:
@@ -2729,7 +2715,7 @@ def increment_view_count(code):
             {"$inc": {"views": 1}},
         ))
     except Exception:
-        pass  # Ko'rilish soni ixtiyoriy — xato bo'lsa e'tiborga olmaymiz
+        pass
 
 
 async def admin_top_movies(update, context):
@@ -2800,11 +2786,7 @@ async def handle_message(update, context):
     if user_id != ADMIN_ID:
         # Verification tekshiruvi
         if VERIFICATION_BOT_URL:
-            try:
-                started_at = get_user_started_at(user_id)
-            except Exception:
-                started_at = None  # DB xatosi — bloklamaymiz
-
+            started_at = get_user_started_at(user_id)
             if started_at is None:
                 await update.message.reply_text(
                     "⚠️ Botdan foydalanish uchun avval quyidagi botga o'ting va /start bosing:\n\n"
@@ -2825,11 +2807,7 @@ async def handle_message(update, context):
                 return
 
         # Kanal obuna tekshiruvi
-        try:
-            is_subscribed, not_subscribed = await check_user_subscribed(context.bot, user_id)
-        except Exception:
-            is_subscribed, not_subscribed = True, []  # Xato bo'lsa — bloklamaymiz
-
+        is_subscribed, not_subscribed = await check_user_subscribed(context.bot, user_id)
         if not is_subscribed:
             await send_subscribe_required_message(update.message, not_subscribed)
             return
@@ -2890,6 +2868,7 @@ async def handle_message(update, context):
         return
 
     # ---- MATN bo'lsa — nom bo'yicha qidirish ----
+    # Juda qisqa so'rovlarni (1 harf) e'tiborsiz qoldiramiz
     if len(text) < 2:
         await update.message.reply_text(
             "🔍 Kino kodini (raqam) yoki nomini yozing.\n"
@@ -2912,6 +2891,7 @@ async def handle_message(update, context):
         return
 
     if len(results) == 1:
+        # Bitta natija — to'g'ridan-to'g'ri kino yuboramiz
         movie = results[0]
         code = movie["code"]
         try:
@@ -2924,6 +2904,7 @@ async def handle_message(update, context):
             await send_movie_to_chat(update.message, code, data, user_id=user_id)
         return
 
+    # Bir nechta natija — ro'yxat ko'rsatamiz
     lines = [f"🔍 «{text}» bo'yicha {len(results)} ta kino topildi:\n"]
     for movie in results:
         nom = movie.get("nom", "-")
@@ -2942,17 +2923,6 @@ def build_application():
     ensure_telegram_imports()
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN topilmadi. Environment variable sifatida sozlang.")
-
-    # --- DB ni botdan OLDIN ishga tushiramiz ---
-    try:
-        _init_db_client()
-        client.admin.command("ping")
-        set_health_state(db="connected", last_error="")
-        logger.info("MongoDB muvaffaqiyatli ulandi.")
-    except Exception as exc:
-        logger.error(f"MongoDB boshlang'ich ulanish xatosi: {exc}")
-        set_health_state(db="error", last_error=str(exc))
-        # Bot ishga tushishda DB bo'lmasa ham davom etadi — qayta ulanish avtomatik bo'ladi
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_error_handler(log_error)
