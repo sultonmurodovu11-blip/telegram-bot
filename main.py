@@ -2951,6 +2951,7 @@ def run_bot_forever():
             app.run_polling(
                 bootstrap_retries=-1,
                 allowed_updates=["message", "callback_query", "chat_member"],
+                drop_pending_updates=True,
             )
             logger.warning("Polling to'xtadi. 5 soniyadan keyin qayta ishga tushadi.")
             set_health_state(bot="stopped")
