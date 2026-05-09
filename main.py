@@ -17,7 +17,7 @@ except ImportError:
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "6102256074"))
 DEFAULT_INSTAGRAM_URL = "https://www.instagram.com/kinotop.bot/"
-INSTAGRAM_CHANNEL_URL = os.environ.get("INSTAGRAM_CHANNEL_URL", "https://www.instagram.com/kinotop.bot?igsh=MTd5am0xbG40ZzZ0Zg%3D%3D&utm_source=qr").strip() or DEFAULT_INSTAGRAM_URL
+INSTAGRAM_CHANNEL_URL = os.environ.get("INSTAGRAM_CHANNEL_URL", "https://www.instagram.com/kinoplay.uzz?igsh=dHNjaHRrbGlyaDFi&utm_source=qr").strip() or DEFAULT_INSTAGRAM_URL
 
 VERIFICATION_BOT_URL = os.environ.get("VERIFICATION_BOT_URL", "").strip()
 VERIFICATION_WAIT_SECONDS = 15
