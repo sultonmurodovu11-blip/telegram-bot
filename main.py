@@ -52,6 +52,7 @@ PyMongoError = Exception
 
 SEARCH_RESULTS_LIMIT = 10
 LIST_PAGE_SIZE = 20
+ADMIN_LIST_PAGE_CALLBACK = "adminlistpage:"
 
 
 def ensure_telegram_imports():
@@ -164,13 +165,10 @@ def get_movies_col():
         client.admin.command("ping")
         db = client["moviebot"]
 
-        # ===================== FIX 1: unique index =====================
-        # user_id ga unique index — duplicate foydalanuvchilarni oldini oladi
         try:
             db["users"].create_index("user_id", unique=True)
         except Exception:
             pass
-        # ==============================================================
 
         movies_col = db["movies"]
         series_col = db["series_groups"]
@@ -529,10 +527,6 @@ def get_movies_for_folder(folder_name):
 
 
 def get_all_user_ids():
-    """
-    MUHIM: distinct() ishlatib duplikat user_id larni yo'q qilish.
-    Bu broadcast da bir odamga ko'p xabar ketishini oldini oladi.
-    """
     try:
         raw = run_users_db(
             lambda col: col.distinct("user_id", {"is_admin": {"$ne": True}})
@@ -747,7 +741,6 @@ async def send_folder_parts_prompt(target_message, folder_data, movies):
     )
 
 
-# ===================== FIX 2: track_user — $setOnInsert bilan =====================
 def track_user(user):
     if user is None:
         return
@@ -763,7 +756,6 @@ def track_user(user):
                     "is_admin": user.id == ADMIN_ID,
                     "last_seen_at": int(time.time()),
                 },
-                # started_at faqat YANGI foydalanuvchi uchun yoziladi
                 "$setOnInsert": {
                     "started_at": int(time.time()),
                 },
@@ -771,7 +763,6 @@ def track_user(user):
             upsert=True,
         )
     )
-# ============================================================================
 
 
 def get_tracked_user_count():
@@ -857,6 +848,7 @@ def get_admin_menu_keyboard():
             ["/ochirish", "/stat"],
             ["/top", "/sevimli"],
             ["/qidirish", "/barchasi"],
+            ["/barchakino"],                   # ← YANGI: admin uchun barcha kinolar
             ["/help"],
         ],
         resize_keyboard=True, one_time_keyboard=False,
@@ -930,6 +922,36 @@ def build_list_page_text(movies, page: int, total: int, page_size: int = LIST_PA
         code = movie.get("code", "-")
         lines.append(f"{i}. 🎬 {nom}  |  Kod: <code>{code}</code>")
     lines.append("\nKino olish uchun kodini yuboring.")
+    return "\n".join(lines)
+
+
+# ===================== ADMIN BARCHAKINO TUGMALARI =====================
+
+def build_admin_list_page_keyboard(page: int, total: int, page_size: int = LIST_PAGE_SIZE):
+    total_pages = (total + page_size - 1) // page_size
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Oldingi", callback_data=f"{ADMIN_LIST_PAGE_CALLBACK}{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
+    if (page + 1) * page_size < total:
+        nav.append(InlineKeyboardButton("Keyingi ➡️", callback_data=f"{ADMIN_LIST_PAGE_CALLBACK}{page + 1}"))
+    rows = [nav]
+    rows.append([InlineKeyboardButton("🔍 Qidirish", switch_inline_query_current_chat="")])
+    return InlineKeyboardMarkup(rows) if nav else None
+
+
+def build_admin_list_page_text(movies, page: int, total: int, page_size: int = LIST_PAGE_SIZE):
+    start = page * page_size + 1
+    total_pages = (total + page_size - 1) // page_size
+    lines = [
+        f"🎬 <b>Barcha kinolar</b> — sahifa {page + 1}/{total_pages}",
+        f"📊 Jami: <b>{total} ta</b> | Ko'rsatilayapti: {start}–{start + len(movies) - 1}\n",
+    ]
+    for i, movie in enumerate(movies, start=start):
+        nom = escape_html(movie.get("nom", "-"))
+        code = movie.get("code", "-")
+        lines.append(f"{i}. <code>{code}</code> | {nom}")
+    lines.append("\n💡 Kino olish uchun kodini yuboring.")
     return "\n".join(lines)
 
 
@@ -1155,7 +1177,7 @@ async def handle_getmovie_callback(update, context):
     await send_movie_to_chat(query.message, code, data, user_id=user_id)
 
 
-# ===================== BARCHA KINOLAR =====================
+# ===================== BARCHA KINOLAR (foydalanuvchi) =====================
 
 async def show_all_movies(update, context):
     remember_user(update)
@@ -1214,6 +1236,71 @@ async def handle_list_page_callback(update, context):
 
     text = build_list_page_text(movies, page=page, total=total)
     keyboard = build_list_page_keyboard(page=page, total=total)
+    try:
+        await query.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    except Exception:
+        pass
+
+
+# ===================== BARCHA KINOLAR (admin /barchakino) =====================
+
+async def barchakino_admin(update, context):
+    """
+    /barchakino — faqat admin.
+    KOD | NOM formatida sahifalab chiqaradi.
+    Qidiruv inline tugmasi ham bor.
+    """
+    remember_user(update)
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Bu buyruq faqat admin uchun.")
+        return
+
+    try:
+        total = get_total_movies_count()
+        movies = get_all_movies_sorted(skip=0, limit=LIST_PAGE_SIZE)
+    except Exception:
+        logger.exception("barchakino_admin: kinolarni olishda xato")
+        await reply_service_unavailable(update)
+        return
+
+    if not movies:
+        await update.message.reply_text("Hali birorta kino qo'shilmagan.")
+        return
+
+    text = build_admin_list_page_text(movies, page=0, total=total)
+    keyboard = build_admin_list_page_keyboard(page=0, total=total)
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+
+async def handle_admin_list_page_callback(update, context):
+    """Admin /barchakino sahifalash callback."""
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    try:
+        page = int(query.data[len(ADMIN_LIST_PAGE_CALLBACK):])
+    except ValueError:
+        return
+
+    try:
+        total = get_total_movies_count()
+        movies = get_all_movies_sorted(skip=page * LIST_PAGE_SIZE, limit=LIST_PAGE_SIZE)
+    except Exception:
+        await query.answer(SERVICE_UNAVAILABLE_TEXT, show_alert=True)
+        return
+
+    if not movies:
+        await query.answer("Bu sahifada kinolar topilmadi.", show_alert=True)
+        return
+
+    text = build_admin_list_page_text(movies, page=page, total=total)
+    keyboard = build_admin_list_page_keyboard(page=page, total=total)
     try:
         await query.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception:
@@ -1514,7 +1601,6 @@ async def _send_bc_message_to_user(bot, uid, bc_text, bc_media, bc_media_type, u
                 raise
 
 
-# ===================== FIX 3: bc_confirm_callback — duplicate broadcast oldini olish =====================
 async def bc_confirm_callback(update, context):
     global _broadcast_active, _broadcast_status_message_id, _admin_sent_messages
     query = update.callback_query
@@ -1536,14 +1622,11 @@ async def bc_confirm_callback(update, context):
         return BC_GET_TEXT
 
     if query.data == "bc_yes":
-        # *** DARHOL tekshirish — 2 marta bosilmasin ***
         if _broadcast_active:
             await query.answer("⚠️ Broadcast allaqachon faol! Kuting.", show_alert=True)
             return ConversationHandler.END
 
-        # *** FLAG NI DARHOL o'rnating — task dan OLDIN ***
         _broadcast_active = True
-
         await query.message.edit_reply_markup(reply_markup=None)
 
         d = context.user_data
@@ -1560,13 +1643,13 @@ async def bc_confirm_callback(update, context):
         try:
             user_ids = get_all_user_ids()
         except Exception:
-            _broadcast_active = False  # Xato bo'lsa reset
+            _broadcast_active = False
             logger.exception("Foydalanuvchilar ro'yxatini olishda xato")
             await query.message.reply_text(SERVICE_UNAVAILABLE_TEXT)
             return ConversationHandler.END
 
         if not user_ids:
-            _broadcast_active = False  # Bo'sh bo'lsa reset
+            _broadcast_active = False
             await query.message.reply_text("Bazada foydalanuvchilar topilmadi.", reply_markup=get_admin_menu_keyboard())
             return ConversationHandler.END
 
@@ -1643,7 +1726,6 @@ async def bc_confirm_callback(update, context):
         return ConversationHandler.END
 
     return BC_CONFIRM
-# ================================================================================
 
 
 async def _send_bc_preview_to_admin(bot, chat_id, bc_text, bc_media, bc_media_type, user_markup):
@@ -1802,7 +1884,8 @@ async def admin_help(update, context):
         "  /top\n\n"
         "Qidirish va ro'yxat:\n"
         "  /qidirish — kino nomini qidirish\n"
-        "  /barchasi — barcha kinolar (sahifalab)\n\n"
+        "  /barchasi — barcha kinolar (foydalanuvchi)\n"
+        "  /barchakino — barcha kinolar (admin, kod|nom)\n\n"
         "Ommaviy xabar:\n"
         "  /adminlik — xabar yuborish\n"
         "  /ochirish — xabarlarni o'chirish\n\n"
@@ -2358,3 +2441,25 @@ async def edit_get_vaqt(update, context):
         reply_markup=get_admin_menu_keyboard(),
     )
     return ConversationHandler.END
+
+
+# ===================== main() — HANDLER QO'SHISH ESLATMASI =====================
+# main() funksiyangizda quyidagilarni qo'shing (mavjud handlerlarga QO'SHIMCHA):
+#
+#   application.add_handler(CommandHandler("barchakino", barchakino_admin))
+#
+#   application.add_handler(CallbackQueryHandler(
+#       handle_admin_list_page_callback,
+#       pattern="^adminlistpage:"
+#   ))
+#
+#   application.add_handler(MessageHandler(
+#       filters.Text(["📋 Barcha kinolar"]),
+#       show_all_movies
+#   ))
+#
+#   application.add_handler(MessageHandler(
+#       filters.Text(["🔍 Qidirish"]),
+#       search_start
+#   ))
+# ============================================================================
