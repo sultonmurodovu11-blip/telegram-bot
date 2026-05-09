@@ -2674,40 +2674,39 @@ async def edit_get_vaqt(update, context):
     return ConversationHandler.END
 
 
-# =====================================================================
-# main() FUNKSIYASIGA QO'SHISH KERAK BO'LGAN HANDLERLAR
-# =====================================================================
-#
-# /search uchun ConversationHandler (boshqalardan OLDIN qo'shing):
-#
-#   search_cmd_conv = ConversationHandler(
-#       entry_points=[CommandHandler("search", cmd_search_start)],
-#       states={
-#           SEARCH_CMD_STATE: [
-#               MessageHandler(filters.TEXT & ~filters.COMMAND, cmd_search_handle),
-#           ],
-#       },
-#       fallbacks=[CommandHandler("cancel", cancel)],
-#       allow_reentry=True,
-#   )
-#   application.add_handler(search_cmd_conv)
-#
-#
-# /barchasi uchun (faqat admin):
-#
-#   application.add_handler(CommandHandler("barchasi", admin_barchasi))
-#
-#   application.add_handler(CallbackQueryHandler(
-#       handle_admin_barchasi_callback,
-#       pattern=r"^abp:"
-#   ))
-#
-#
-# /barchakino uchun (mavjud):
-#   application.add_handler(CommandHandler("barchakino", barchakino_admin))
-#   application.add_handler(CallbackQueryHandler(
-#       handle_admin_list_page_callback,
-#       pattern="^adminlistpage:"
-#   ))
-#
-# =====================================================================
+ =====================================================================
+ main() FUNKSIYASIGA QO'SHISH KERAK BO'LGAN HANDLERLAR
+ =====================================================================
+
+ /search uchun ConversationHandler (boshqalardan OLDIN qo'shing):
+
+   search_cmd_conv = ConversationHandler(
+       entry_points=[CommandHandler("search", cmd_search_start)],
+       states={
+           SEARCH_CMD_STATE: [
+               MessageHandler(filters.TEXT & ~filters.COMMAND, cmd_search_handle),
+           ],
+       },
+       fallbacks=[CommandHandler("cancel", cancel)],
+       allow_reentry=True,
+   )
+   application.add_handler(search_cmd_conv)
+
+ /barchasi uchun (faqat admin):
+
+   application.add_handler(CommandHandler("barchasi", admin_barchasi))
+
+   application.add_handler(CallbackQueryHandler(
+       handle_admin_barchasi_callback,
+       pattern=r"^abp:"
+   ))
+
+
+ /barchakino uchun (mavjud):
+   application.add_handler(CommandHandler("barchakino", barchakino_admin))
+   application.add_handler(CallbackQueryHandler(
+      handle_admin_list_page_callback,
+      pattern="^adminlistpage:"
+   ))
+
+
