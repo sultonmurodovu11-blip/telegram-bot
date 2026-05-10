@@ -955,15 +955,16 @@ async def send_confirm_prompt(update, data):
     )
 
 
-# State raqamlari
+# ===================== STATE RAQAMLARI =====================
 KOD_VAQT, NOM, SIFAT, TIL, VAQT, CONFIRM, FOLDER_CHOICE, FOLDER_CREATE, FOLDER_PICK = range(9)
 EDIT_KOD, EDIT_NOM, EDIT_SIFAT, EDIT_TIL, EDIT_VAQT = range(9, 14)
 JILD_CODES, JILD_NAME = range(14, 16)
 BC_GET_TEXT, BC_GET_MEDIA, BC_ASK_BUTTON, BC_GET_URL, BC_GET_BTN_NAME, BC_CONFIRM = range(16, 22)
 ADDCH_GET_TITLE = 22
 SEARCH_INPUT = 23
-# ===== YANGI STATE RAQAMLARI =====
 IXTIYORIY_LINK, IXTIYORIY_NOM, IXTIYORIY_RASM = range(24, 27)
+# ===== POLL STATE RAQAMLARI =====
+BC_POLL_QUESTION, BC_POLL_OPTIONS, BC_POLL_CONFIRM = range(27, 30)
 
 
 async def log_error(update: object, context):
@@ -1311,7 +1312,6 @@ async def handle_user_profil(update, context):
 
 
 async def handle_user_obuna(update, context):
-    """Foydalanuvchi 📋 Kanallar tugmasini bosadi — DB dan o'qiydi."""
     try:
         optional_channels = get_all_optional_channels_db()
     except Exception:
@@ -1331,8 +1331,6 @@ async def handle_user_obuna(update, context):
         rows.append([InlineKeyboardButton(f"📢 {title}", url=link)])
 
     markup = InlineKeyboardMarkup(rows)
-
-    # Birinchi kanalda rasm bo'lsa — rasm bilan yuborish
     first_photo = optional_channels[0].get("photo_id", "") if optional_channels else ""
     if first_photo:
         await update.message.reply_photo(
@@ -1368,7 +1366,6 @@ async def handle_user_aloqa(update, context):
 # ===================== IXTIYORIY OBUNA CONVERSATION =====================
 
 async def ixtiyoriy_obuna_start(update, context):
-    """Admin /ixtiyoriyobuna buyrug'ini yozadi."""
     remember_user(update)
     if update.message.from_user.id != ADMIN_ID:
         return ConversationHandler.END
@@ -1476,7 +1473,6 @@ async def ixtiyoriy_get_rasm(update, context):
 # ===================== IXTIYORIY O'CHIRISH =====================
 
 async def ixtiyoriy_remove_start(update, context):
-    """Admin /ixtiyoriyochirish buyrug'i."""
     remember_user(update)
     if update.message.from_user.id != ADMIN_ID:
         return
@@ -1489,8 +1485,7 @@ async def ixtiyoriy_remove_start(update, context):
 
     if not channels:
         await update.message.reply_text(
-            "Hali ixtiyoriy kanal qo'shilmagan.\n\n"
-            "Qo'shish uchun /ixtiyoriyobuna",
+            "Hali ixtiyoriy kanal qo'shilmagan.\n\nQo'shish uchun /ixtiyoriyobuna",
             reply_markup=get_admin_menu_keyboard(),
         )
         return
@@ -1561,10 +1556,12 @@ async def admin_broadcast_start(update, context):
         await update.message.reply_text("⚠️ Hozir yuborish jarayoni faol. Kuting yoki /cancel bosing.")
         return ConversationHandler.END
     await update.message.reply_text(
-        "📢 Ommaviy xabar yozish\n\nYubormoqchi bo'lgan matnni kiriting.\n"
-        "Formatlash (HTML) ishlaydi:\n  <b>qalin matn</b>\n  <i>kursiv matn</i>\n  <code>kod</code>\n\n"
-        "❌ Bekor qilish uchun /cancel",
-        reply_markup=get_bc_cancel_keyboard(),
+        "📢 Nima yubormoqchisiz?",
+        reply_markup=ReplyKeyboardMarkup(
+            [["📝 Matn/Rasm yuborish", "📊 Sorovnoma yuborish"], ["❌ Bekor qilish"]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        ),
     )
     return BC_GET_TEXT
 
@@ -1574,9 +1571,34 @@ async def bc_get_text(update, context):
     if text in ("❌ Bekor qilish", "/cancel"):
         await update.message.reply_text("❌ Bekor qilindi.", reply_markup=get_admin_menu_keyboard())
         return ConversationHandler.END
+
+    # ===== POLL YO'LI =====
+    if text == "📊 Sorovnoma yuborish":
+        await update.message.reply_text(
+            "📊 Sorovnoma savolini yozing:\n\n"
+            "Misol: <b>Qaysi maktabda o'qiysiz?</b>\n\n"
+            "❌ Bekor qilish uchun /cancel",
+            parse_mode="HTML",
+            reply_markup=get_bc_cancel_keyboard(),
+        )
+        return BC_POLL_QUESTION
+
+    # ===== ODDIY MATN YO'LI =====
+    if text == "📝 Matn/Rasm yuborish":
+        await update.message.reply_text(
+            "📝 Yubormoqchi bo'lgan matnni kiriting.\n"
+            "Formatlash (HTML) ishlaydi:\n  <b>qalin matn</b>\n  <i>kursiv matn</i>\n  <code>kod</code>\n\n"
+            "❌ Bekor qilish uchun /cancel",
+            parse_mode="HTML",
+            reply_markup=get_bc_cancel_keyboard(),
+        )
+        return BC_GET_TEXT
+
+    # Agar admin to'g'ridan matn yozsa
     if not text:
         await update.message.reply_text("Matn bo'sh bo'lmasin. Qayta yuboring:")
         return BC_GET_TEXT
+
     context.user_data["bc_text"] = text
     context.user_data["bc_media"] = None
     context.user_data["bc_media_type"] = None
@@ -1586,6 +1608,234 @@ async def bc_get_text(update, context):
     )
     return BC_GET_MEDIA
 
+
+# ===================== POLL BROADCAST CONVERSATION =====================
+
+async def bc_poll_get_question(update, context):
+    """Poll savolini olish."""
+    text = update.message.text.strip()
+    if text in ("❌ Bekor qilish", "/cancel"):
+        await update.message.reply_text("❌ Bekor qilindi.", reply_markup=get_admin_menu_keyboard())
+        return ConversationHandler.END
+
+    if not text:
+        await update.message.reply_text("Savol bo'sh bo'lmasin. Qayta yozing:", reply_markup=get_bc_cancel_keyboard())
+        return BC_POLL_QUESTION
+
+    if len(text) > 300:
+        await update.message.reply_text("⚠️ Savol 300 ta belgidan oshmasin. Qayta yozing:", reply_markup=get_bc_cancel_keyboard())
+        return BC_POLL_QUESTION
+
+    context.user_data["bc_poll_question"] = text
+    context.user_data["bc_poll_options"] = []
+
+    await update.message.reply_text(
+        "✅ Savol qabul qilindi!\n\n"
+        "📝 Endi javob variantlarini yuboring — <b>har birini alohida xabar</b> qilib yuboring.\n\n"
+        "Kamida 2 ta, ko'pi bilan 10 ta variant bo'lishi mumkin.\n\n"
+        "Variantlarni kiritib bo'lgach <b>✅ Tugatish</b> tugmasini bosing.\n\n"
+        "❌ Bekor qilish uchun /cancel",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup(
+            [["✅ Tugatish"], ["❌ Bekor qilish"]],
+            resize_keyboard=True,
+            one_time_keyboard=False,
+        ),
+    )
+    return BC_POLL_OPTIONS
+
+
+async def bc_poll_get_options(update, context):
+    """Poll variantlarini olish."""
+    text = update.message.text.strip()
+
+    if text in ("❌ Bekor qilish", "/cancel"):
+        await update.message.reply_text("❌ Bekor qilindi.", reply_markup=get_admin_menu_keyboard())
+        return ConversationHandler.END
+
+    options = context.user_data.get("bc_poll_options", [])
+
+    if text == "✅ Tugatish":
+        if len(options) < 2:
+            await update.message.reply_text(
+                f"⚠️ Kamida 2 ta variant kerak. Hozir {len(options)} ta bor.\n\nDavom eting:",
+                reply_markup=ReplyKeyboardMarkup(
+                    [["✅ Tugatish"], ["❌ Bekor qilish"]],
+                    resize_keyboard=True,
+                    one_time_keyboard=False,
+                ),
+            )
+            return BC_POLL_OPTIONS
+
+        # Preview ko'rsatish
+        question = context.user_data.get("bc_poll_question", "")
+        options_text = "\n".join([f"  {i+1}. {opt}" for i, opt in enumerate(options)])
+        await update.message.reply_text(
+            f"📊 Sorovnoma ko'rinishi:\n\n"
+            f"❓ <b>{escape_html(question)}</b>\n\n"
+            f"{escape_html(options_text)}\n\n"
+            f"🔒 Anonim ovoz berish\n"
+            f"👁 Natijalar faqat adminga ko'rinadi\n\n"
+            f"Yuborishni tasdiqlaysizmi?",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        confirm_markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Yuborish", callback_data="bc_poll_yes"),
+            InlineKeyboardButton("✏️ Qayta", callback_data="bc_poll_edit"),
+            InlineKeyboardButton("❌ Bekor", callback_data="bc_cancel"),
+        ]])
+        await update.message.reply_text("Tanlov:", reply_markup=confirm_markup)
+        return BC_POLL_CONFIRM
+
+    # Variant qo'shish
+    if not text:
+        await update.message.reply_text("Variant bo'sh bo'lmasin.")
+        return BC_POLL_OPTIONS
+
+    if len(text) > 100:
+        await update.message.reply_text("⚠️ Variant 100 ta belgidan oshmasin. Qayta yozing:")
+        return BC_POLL_OPTIONS
+
+    if len(options) >= 10:
+        await update.message.reply_text(
+            "⚠️ Ko'pi bilan 10 ta variant bo'lishi mumkin.\n✅ Tugatish tugmasini bosing.",
+            reply_markup=ReplyKeyboardMarkup(
+                [["✅ Tugatish"], ["❌ Bekor qilish"]],
+                resize_keyboard=True,
+                one_time_keyboard=False,
+            ),
+        )
+        return BC_POLL_OPTIONS
+
+    options.append(text)
+    context.user_data["bc_poll_options"] = options
+
+    await update.message.reply_text(
+        f"✅ Variant qo'shildi: <b>{escape_html(text)}</b>\n"
+        f"Jami: {len(options)} ta variant\n\n"
+        f"Yana variant yuboring yoki ✅ Tugatish tugmasini bosing.",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup(
+            [["✅ Tugatish"], ["❌ Bekor qilish"]],
+            resize_keyboard=True,
+            one_time_keyboard=False,
+        ),
+    )
+    return BC_POLL_OPTIONS
+
+
+async def bc_poll_confirm_callback(update, context):
+    """Poll broadcast tasdiqlash."""
+    global _broadcast_active, _broadcast_status_message_id
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    if query.data == "bc_cancel":
+        await query.message.edit_reply_markup(reply_markup=None)
+        await query.message.reply_text("❌ Bekor qilindi.", reply_markup=get_admin_menu_keyboard())
+        return ConversationHandler.END
+
+    if query.data == "bc_poll_edit":
+        await query.message.edit_reply_markup(reply_markup=None)
+        context.user_data["bc_poll_options"] = []
+        await query.message.reply_text(
+            "Yangi savol yozing:\n\n❌ Bekor qilish uchun /cancel",
+            reply_markup=get_bc_cancel_keyboard(),
+        )
+        return BC_POLL_QUESTION
+
+    if query.data == "bc_poll_yes":
+        await query.message.edit_reply_markup(reply_markup=None)
+
+        question = context.user_data.get("bc_poll_question", "")
+        options = context.user_data.get("bc_poll_options", [])
+
+        try:
+            user_ids = get_all_user_ids()
+        except Exception:
+            await query.message.reply_text(SERVICE_UNAVAILABLE_TEXT)
+            return ConversationHandler.END
+
+        if not user_ids:
+            await query.message.reply_text("Bazada foydalanuvchilar topilmadi.", reply_markup=get_admin_menu_keyboard())
+            return ConversationHandler.END
+
+        total = len(user_ids)
+        taxminiy = round(total * 0.09 / 60)
+        chat_id = update.effective_chat.id
+
+        # Admin o'zi uchun preview
+        try:
+            await context.bot.send_poll(
+                chat_id=chat_id,
+                question=question,
+                options=options,
+                is_anonymous=True,
+                allows_multiple_answers=False,
+            )
+        except Exception:
+            logger.exception("Admin preview poll yuborishda xato")
+
+        status_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"📊 Sorovnoma yuborish boshlandi!\nJami: {total} ta foydalanuvchi\nTaxminiy vaqt: ~{taxminiy} daqiqa",
+            reply_markup=get_broadcast_stop_keyboard(),
+        )
+        _broadcast_status_message_id = status_msg.message_id
+        _broadcast_active = True
+        bot = context.bot
+
+        async def do_send_poll():
+            global _broadcast_active, _broadcast_status_message_id
+            sent = 0
+            failed = 0
+            blocked = 0
+            for uid in user_ids:
+                if not _broadcast_active:
+                    break
+                try:
+                    await bot.send_poll(
+                        chat_id=int(uid),
+                        question=question,
+                        options=options,
+                        is_anonymous=True,
+                        allows_multiple_answers=False,
+                    )
+                    sent += 1
+                except Exception as e:
+                    err = str(e).lower()
+                    if any(k in err for k in ["blocked", "deactivated", "not found", "chat not found"]):
+                        blocked += 1
+                    else:
+                        failed += 1
+                await asyncio.sleep(0.09)
+
+            await _remove_broadcast_stop_button(bot, chat_id, _broadcast_status_message_id)
+            stopped_early = not _broadcast_active
+            _broadcast_active = False
+            lines = ["⛔ Broadcast to'xtatildi!" if stopped_early else "✅ Sorovnoma yuborish tugadi!"]
+            lines.append(f"Muvaffaqiyatli: {sent} ta")
+            if blocked:
+                lines.append(f"Bot bloklagan: {blocked} ta")
+            if failed:
+                lines.append(f"Boshqa xato: {failed} ta")
+            try:
+                await bot.send_message(chat_id=chat_id, text="\n".join(lines), reply_markup=get_admin_menu_keyboard())
+            except Exception:
+                pass
+
+        asyncio.create_task(do_send_poll())
+        return ConversationHandler.END
+
+    return BC_POLL_CONFIRM
+
+
+# ===================== ODDIY BROADCAST (mavjud) =====================
 
 async def bc_get_media(update, context):
     msg = update.message
@@ -1970,8 +2220,8 @@ async def admin_help(update, context):
         "Statistika: /foydalanuvchi 777, /stat, /top, /barchasi\n"
         "Ommaviy xabar: /adminlik, /ochirish\n"
         "Sevimlilar: /sevimli\n\n"
-        "Broadcast: /adminlik — matn yozib, tugma bilan yoki tugsiz yuborish\n"
-        "Broadcast tugmasi: kanal linki yoki boshqa URL bo'lishi mumkin"
+        "Broadcast: /adminlik — matn yoki sorovnoma yuborish\n"
+        "Sorovnoma: /adminlik → '📊 Sorovnoma yuborish' → savol → variantlar"
     )
     await update.message.reply_text(help_text, reply_markup=get_admin_menu_keyboard())
 
@@ -3029,21 +3279,29 @@ def build_application():
         allow_reentry=True,
     )
 
-    # Broadcast conversation
+    # Broadcast conversation — matn/rasm VA poll bitta conversation ichida
     broadcast_conv = ConversationHandler(
         entry_points=[CommandHandler("adminlik", admin_broadcast_start)],
         states={
-            BC_GET_TEXT:    [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_get_text)],
-            BC_GET_MEDIA:   [
+            # Birinchi tanlov
+            BC_GET_TEXT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_get_text),
+            ],
+            # Oddiy broadcast yo'li
+            BC_GET_MEDIA: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_get_media),
                 MessageHandler(filters.PHOTO & filters.User(ADMIN_ID), bc_get_media),
                 MessageHandler(filters.ANIMATION & filters.User(ADMIN_ID), bc_get_media),
                 MessageHandler(filters.VIDEO & filters.User(ADMIN_ID), bc_get_media),
             ],
-            BC_ASK_BUTTON:  [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_ask_button)],
-            BC_GET_URL:     [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_get_url)],
-            BC_GET_BTN_NAME:[MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_get_btn_name)],
-            BC_CONFIRM:     [CallbackQueryHandler(bc_confirm_callback, pattern="^bc_")],
+            BC_ASK_BUTTON:   [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_ask_button)],
+            BC_GET_URL:      [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_get_url)],
+            BC_GET_BTN_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_get_btn_name)],
+            BC_CONFIRM:      [CallbackQueryHandler(bc_confirm_callback, pattern="^bc_")],
+            # Poll yo'li
+            BC_POLL_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_poll_get_question)],
+            BC_POLL_OPTIONS:  [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_poll_get_options)],
+            BC_POLL_CONFIRM:  [CallbackQueryHandler(bc_poll_confirm_callback, pattern="^(bc_poll_yes|bc_poll_edit|bc_cancel)$")],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
@@ -3059,7 +3317,7 @@ def build_application():
         allow_reentry=True,
     )
 
-    # Ixtiyoriy obuna conversation — YANGI
+    # Ixtiyoriy obuna conversation
     ixtiyoriy_conv = ConversationHandler(
         entry_points=[CommandHandler("ixtiyoriyobuna", ixtiyoriy_obuna_start)],
         states={
