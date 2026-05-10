@@ -22,6 +22,28 @@ INSTAGRAM_CHANNEL_URL = os.environ.get("INSTAGRAM_CHANNEL_URL", "https://www.ins
 VERIFICATION_BOT_URL = os.environ.get("VERIFICATION_BOT_URL", "").strip()
 VERIFICATION_WAIT_SECONDS = 15
 
+# ===================== ALOQA MA'LUMOTLARI =====================
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "@Ulugbeck_dev").strip()
+ADMIN_PHONE = os.environ.get("ADMIN_PHONE", "+998946662211").strip()
+
+# ===================== IXTIYORIY KANALLAR (Obuna tugmasi uchun) =====================
+# Format: "https://t.me/kanal1|Kanal nomi 1,https://t.me/kanal2|Kanal nomi 2"
+OPTIONAL_CHANNELS_ENV = os.environ.get("OPTIONAL_CHANNELS", "").strip()
+
+def get_optional_channels():
+    """Ixtiyoriy kanallar ro'yxatini qaytaradi."""
+    if not OPTIONAL_CHANNELS_ENV:
+        return []
+    channels = []
+    for item in OPTIONAL_CHANNELS_ENV.split(","):
+        item = item.strip()
+        if "|" in item:
+            parts = item.split("|", 1)
+            channels.append({"link": parts[0].strip(), "title": parts[1].strip()})
+        elif item:
+            channels.append({"link": item, "title": "Kanalga o'tish"})
+    return channels
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s:%(name)s:%(message)s",
@@ -116,6 +138,14 @@ DURATION_CLEAR_TEXT = "🧹 Tozalash"
 DURATION_ALLOWED_CHARS = set("0123456789:")
 DURATION_MAX_LENGTH = 10
 SERIES_CALLBACK_PREFIX = "series_part:"
+
+# Foydalanuvchi menyu tugmalari
+USER_BTN_REKLAMA = "💰 Reklama narxlari"
+USER_BTN_YANGI = "🎬 Yangi filmlar"
+USER_BTN_SEVIMLI = "❤️ Sevimlilar"
+USER_BTN_PROFIL = "👤 Profil"
+USER_BTN_OBUNA = "📋 Kanallar"
+USER_BTN_ALOQA = "📞 Aloqa"
 
 _broadcast_active = False
 _broadcast_status_message_id = None
@@ -359,6 +389,26 @@ def get_movie(code):
     }
 
 
+def get_latest_movies(limit: int = 10):
+    """Oxirgi qo'shilgan kinolarni qaytaradi."""
+    def operation(col):
+        pipeline = [
+            {
+                "$addFields": {
+                    "code_num": {
+                        "$convert": {"input": "$code", "to": "int", "onError": None, "onNull": None}
+                    }
+                }
+            },
+            {"$match": {"code_num": {"$ne": None}}},
+            {"$sort": {"_id": -1}},
+            {"$limit": limit},
+            {"$project": {"_id": 0, "code": 1, "nom": 1, "sifat": 1, "til": 1}},
+        ]
+        return list(col.aggregate(pipeline))
+    return run_db(operation)
+
+
 def parse_numeric_code(value):
     if not value or not value.isdigit():
         return None
@@ -512,14 +562,9 @@ def get_all_user_ids():
 # ===================== QIDIRUV FUNKSIYASI =====================
 
 def search_movies_by_name(query: str, limit: int = 20):
-    """
-    Qisman mos keluvchi kinolarni qidiradi.
-    'ron' yozsа 'Ronaldo', 'Kronos' kabi kinolar chiqadi.
-    """
     if not query or not query.strip():
         return []
     query = query.strip()
-    # MongoDB regex qidiruvi — harflar tartibiga qarab qisman moslik
     regex_pattern = ".*".join(re.escape(ch) for ch in query)
     try:
         results = run_db(
@@ -615,6 +660,39 @@ def get_user_started_at(user_id):
         return None
     except Exception:
         return None
+
+
+def get_user_doc(user_id):
+    """Foydalanuvchi haqida to'liq ma'lumot."""
+    try:
+        return run_users_db(lambda col: col.find_one({"user_id": user_id}, {"_id": 0}))
+    except Exception:
+        return None
+
+
+def get_user_view_count(user_id):
+    """Foydalanuvchi ko'rgan kinolar soni."""
+    try:
+        doc = run_users_db(lambda col: col.find_one({"user_id": user_id}, {"view_count": 1, "_id": 0}))
+        if doc:
+            return doc.get("view_count", 0)
+        return 0
+    except Exception:
+        return 0
+
+
+def increment_user_view_count(user_id):
+    """Foydalanuvchi ko'rgan kinolar sonini oshirish."""
+    try:
+        run_users_db(
+            lambda col: col.update_one(
+                {"user_id": user_id},
+                {"$inc": {"view_count": 1}},
+                upsert=True,
+            )
+        )
+    except Exception:
+        pass
 
 
 def get_verification_keyboard():
@@ -746,6 +824,8 @@ async def send_movie_to_chat(target_message, code, data, user_id=None):
     caption = build_movie_caption(code, data)
     reply_markup = get_movie_reply_markup(code, user_id=user_id)
     file_id = data["file_id"]
+    if user_id and user_id != ADMIN_ID:
+        increment_user_view_count(user_id)
     if data["type"] == "video":
         await target_message.reply_video(video=file_id, caption=caption, reply_markup=reply_markup)
     else:
@@ -806,6 +886,19 @@ def remember_user(update):
 
 
 # ===================== TUGMALAR =====================
+
+def get_user_menu_keyboard():
+    """Foydalanuvchi uchun asosiy menyu."""
+    return ReplyKeyboardMarkup(
+        [
+            [USER_BTN_REKLAMA, USER_BTN_YANGI],
+            [USER_BTN_SEVIMLI, USER_BTN_PROFIL],
+            [USER_BTN_OBUNA, USER_BTN_ALOQA],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
 
 def get_sifat_keyboard():
     return ReplyKeyboardMarkup(
@@ -1037,7 +1130,8 @@ async def start(update, context):
             "🎬 Salom! Movie HD botiga xush kelibsiz!\n\n"
             "✅ Kino kodini yuboring va filmni oling!\n\n"
             "🔍 Kino nomini yozib ham qidirishingiz mumkin!\n\n"
-            "Masalan: 1 yoki 25 yoki Ronaldo"
+            "Masalan: 1 yoki 25 yoki Ronaldo",
+            reply_markup=get_user_menu_keyboard(),
         )
 
 
@@ -1055,6 +1149,148 @@ def seconds_to_hhmmss(seconds: int) -> str:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     else:
         return f"{minutes}:{secs:02d}"
+
+
+# ===================== FOYDALANUVCHI MENYU HANDLERLARI =====================
+
+async def handle_user_reklama(update, context):
+    """Reklama narxlari."""
+    await update.message.reply_text(
+        "Assalomu alaykum 👋\n"
+        "Reklama narxlari 💰\n\n"
+        "Telegram kanallar va guruhlar uchun:\n"
+        "• 1 000 ta obunachi — 100 000 so'm 💸\n"
+        "• 3 000 ta obunachi — 280 000 so'm 💸\n"
+        "• 5 000 ta obunachi — 450 000 so'm 💸\n\n"
+        "Instagram uchun 🌐:\n"
+        "• 1 000 ta obunachi — 200 000 so'm 💸\n"
+        "• 2 000 ta obunachi — 380 000 so'm 💸\n"
+        "• 3 000 ta obunachi — 550 000 so'm 💸\n\n"
+        "YouTube uchun 📲:\n"
+        "• 1 000 ta obunachi — 250 000 so'm 💸\n"
+        "• 2 000 ta obunachi — 450 000 so'm 💸\n\n"
+        "✅ 100% jonli obunachilar (Uzb obunachilar)\n"
+        "⚙️ Kanalga qarab narxlar o'zgarishi mumkin\n\n"
+        "🛠 Zayafka kanal ham qilib beramiz: 10K — 600 000 so'm 💸\n\n"
+        "Narxlar bilan tanishib keyin adminga yozing 📩",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✉️ Adminga yozish", url=f"https://t.me/{ADMIN_USERNAME.lstrip('@')}")]
+        ]),
+    )
+
+
+async def handle_user_yangi_filmlar(update, context):
+    """Oxirgi qo'shilgan 10 ta kino."""
+    try:
+        movies = get_latest_movies(limit=10)
+    except Exception:
+        logger.exception("Yangi kinolarni olishda xato")
+        await reply_service_unavailable(update)
+        return
+
+    if not movies:
+        await update.message.reply_text(
+            "🎬 Hali kino qo'shilmagan.",
+            reply_markup=get_user_menu_keyboard(),
+        )
+        return
+
+    lines = ["🎬 Oxirgi qo'shilgan kinolar:\n"]
+    for i, movie in enumerate(movies, start=1):
+        nom = movie.get("nom", "-")
+        code = movie.get("code", "-")
+        sifat = movie.get("sifat", "-")
+        lines.append(f"{i}. {nom}  |  {sifat}  |  Kod: <b>{code}</b>")
+
+    lines.append("\nKino olish uchun kodini yuboring 👆")
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=get_user_menu_keyboard(),
+    )
+
+
+async def handle_user_profil(update, context):
+    """Foydalanuvchi profili."""
+    user = update.message.from_user
+    user_id = user.id
+
+    try:
+        user_doc = get_user_doc(user_id)
+        fav_codes = get_favorites(user_id)
+        view_count = get_user_view_count(user_id)
+    except Exception:
+        logger.exception("Profil ma'lumotlarini olishda xato")
+        await reply_service_unavailable(update)
+        return
+
+    first_name = user.first_name or "-"
+    last_name = user.last_name or ""
+    username = f"@{user.username}" if user.username else "Yo'q"
+    full_name = f"{first_name} {last_name}".strip()
+
+    started_at = user_doc.get("started_at") if user_doc else None
+    if started_at:
+        reg_date = time.strftime("%Y-%m-%d", time.localtime(started_at))
+    else:
+        reg_date = "Noma'lum"
+
+    last_seen = user_doc.get("last_seen_at") if user_doc else None
+    if last_seen:
+        last_seen_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(last_seen))
+    else:
+        last_seen_str = "Noma'lum"
+
+    await update.message.reply_text(
+        f"👤 Sizning profilingiz\n\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
+        f"📛 Ism: {escape_html(full_name)}\n"
+        f"🔖 Username: {escape_html(username)}\n"
+        f"📅 Ro'yxatdan o'tgan: {reg_date}\n"
+        f"🕐 Oxirgi faollik: {last_seen_str}\n\n"
+        f"🎬 Ko'rilgan kinolar: {view_count} ta\n"
+        f"❤️ Sevimlilar: {len(fav_codes)} ta",
+        parse_mode="HTML",
+        reply_markup=get_user_menu_keyboard(),
+    )
+
+
+async def handle_user_obuna(update, context):
+    """Ixtiyoriy kanallar ro'yxati."""
+    optional_channels = get_optional_channels()
+
+    if not optional_channels:
+        await update.message.reply_text(
+            "📋 Hozircha tavsiya kanallar yo'q.\n\n"
+            "Kino kodini yuboring va filmni oling!",
+            reply_markup=get_user_menu_keyboard(),
+        )
+        return
+
+    rows = []
+    for ch in optional_channels:
+        rows.append([InlineKeyboardButton(f"📢 {ch['title']}", url=ch["link"])])
+
+    await update.message.reply_text(
+        "📋 Bizning kanallarimiz\n\n"
+        "Quyidagi kanallarga qo'shiling va eng so'nggi kinolardan xabardor bo'ling! 👇",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def handle_user_aloqa(update, context):
+    """Aloqa ma'lumotlari."""
+    admin_link = f"https://t.me/{ADMIN_USERNAME.lstrip('@')}"
+    await update.message.reply_text(
+        "📞 Aloqa\n\n"
+        f"👤 Admin: {escape_html(ADMIN_USERNAME)}\n"
+        f"📱 Telefon: {escape_html(ADMIN_PHONE)}\n\n"
+        "Savol, taklif yoki muammo bo'lsa adminga yozing 👇",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✉️ Adminga yozish", url=admin_link)]
+        ]),
+    )
 
 
 # ===================== BROADCAST =====================
@@ -1619,7 +1855,10 @@ async def admin_help(update, context):
         "  /adminlik — matn, media, tugma qo'shish, yuborish\n"
         "  /ochirish — yuborilgan xabarlarni o'chirish\n\n"
         "Sevimlilar:\n"
-        "  /sevimli — o'z sevimlilar ro'yxatini ko'rish"
+        "  /sevimli — o'z sevimlilar ro'yxatini ko'rish\n\n"
+        "Ixtiyoriy kanallar (Obuna tugmasi):\n"
+        "  OPTIONAL_CHANNELS environment variable orqali sozlang:\n"
+        "  https://t.me/kanal1|Kanal nomi 1,https://t.me/kanal2|Kanal 2"
     )
 
     await update.message.reply_text(help_text, reply_markup=get_admin_menu_keyboard())
@@ -1658,7 +1897,6 @@ async def admin_stat(update, context):
 # ===================== BARCHASI — ADMIN UCHUN =====================
 
 async def admin_all_movies(update, context):
-    """Faqat admin uchun: barcha kinolar nomi va kodi."""
     remember_user(update)
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
@@ -1683,7 +1921,6 @@ async def admin_all_movies(update, context):
 
     text = "\n".join(lines)
 
-    # Telegram 4096 belgidan uzun xabar qabul qilmaydi — bo'laklarga ajratamiz
     if len(text) <= 4096:
         await update.message.reply_text(text)
     else:
@@ -2569,7 +2806,8 @@ async def handle_check_subscription_callback(update, context):
         await query.message.edit_reply_markup(reply_markup=None)
         await query.message.reply_text(
             "✅ Rahmat! Obuna tasdiqlandi.\n\n"
-            "Endi kino kodini yuboring."
+            "Endi kino kodini yuboring.",
+            reply_markup=get_user_menu_keyboard(),
         )
     else:
         try:
@@ -2618,6 +2856,8 @@ async def handle_series_part_callback(update, context):
         return
 
     increment_view_count(code)
+    if user_id and user_id != ADMIN_ID:
+        increment_user_view_count(user_id)
     await send_movie_to_chat(query.message, code, data, user_id=user_id)
 
 
@@ -2681,7 +2921,8 @@ async def show_favorites(update, context):
     if not fav_codes:
         await update.message.reply_text(
             "Sevimlilar ro'yxatingiz hali bo'sh.\n\n"
-            "Kino ko'rganingizda pastdagi 🤍 tugmani bosib qo'shing!"
+            "Kino ko'rganingizda pastdagi 🤍 tugmani bosib qo'shing!",
+            reply_markup=get_user_menu_keyboard(),
         )
         return
 
@@ -2703,7 +2944,10 @@ async def show_favorites(update, context):
         nom = code_to_nom.get(code, "Noma'lum")
         lines.append(f"{i}. {nom}  |  Kod: {code}")
     lines.append("\nKino olish uchun kodini yuboring.")
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text(
+        "\n".join(lines),
+        reply_markup=get_user_menu_keyboard(),
+    )
 
 
 # ===================== KO'RILISH SONI =====================
@@ -2783,7 +3027,32 @@ async def handle_message(update, context):
     user_id = update.message.from_user.id
     text = update.message.text.strip()
 
+    # ===================== FOYDALANUVCHI MENYU TUGMALARI =====================
     if user_id != ADMIN_ID:
+        if text == USER_BTN_REKLAMA:
+            await handle_user_reklama(update, context)
+            return
+
+        if text == USER_BTN_YANGI:
+            await handle_user_yangi_filmlar(update, context)
+            return
+
+        if text == USER_BTN_SEVIMLI:
+            await show_favorites(update, context)
+            return
+
+        if text == USER_BTN_PROFIL:
+            await handle_user_profil(update, context)
+            return
+
+        if text == USER_BTN_OBUNA:
+            await handle_user_obuna(update, context)
+            return
+
+        if text == USER_BTN_ALOQA:
+            await handle_user_aloqa(update, context)
+            return
+
         # Verification tekshiruvi
         if VERIFICATION_BOT_URL:
             started_at = get_user_started_at(user_id)
@@ -2860,7 +3129,11 @@ async def handle_message(update, context):
             return
 
         if not data:
-            await update.message.reply_text(f"❌ {code} kodli kino topilmadi.")
+            await update.message.reply_text(
+                f"❌ {code} kodli kino topilmadi.\n\n"
+                "🔍 Kino nomini yozib ham qidirishingiz mumkin!",
+                reply_markup=get_user_menu_keyboard() if user_id != ADMIN_ID else None,
+            )
             return
 
         increment_view_count(code)
@@ -2868,11 +3141,11 @@ async def handle_message(update, context):
         return
 
     # ---- MATN bo'lsa — nom bo'yicha qidirish ----
-    # Juda qisqa so'rovlarni (1 harf) e'tiborsiz qoldiramiz
     if len(text) < 2:
         await update.message.reply_text(
             "🔍 Kino kodini (raqam) yoki nomini yozing.\n"
-            "Masalan: 25 yoki Ronaldo"
+            "Masalan: 25 yoki Ronaldo",
+            reply_markup=get_user_menu_keyboard() if user_id != ADMIN_ID else None,
         )
         return
 
@@ -2886,12 +3159,12 @@ async def handle_message(update, context):
     if not results:
         await update.message.reply_text(
             f"🔍 «{text}» bo'yicha hech narsa topilmadi.\n\n"
-            "Boshqa nom yoki kino kodini kiriting."
+            "Boshqa nom yoki kino kodini kiriting.",
+            reply_markup=get_user_menu_keyboard() if user_id != ADMIN_ID else None,
         )
         return
 
     if len(results) == 1:
-        # Bitta natija — to'g'ridan-to'g'ri kino yuboramiz
         movie = results[0]
         code = movie["code"]
         try:
@@ -2904,7 +3177,6 @@ async def handle_message(update, context):
             await send_movie_to_chat(update.message, code, data, user_id=user_id)
         return
 
-    # Bir nechta natija — ro'yxat ko'rsatamiz
     lines = [f"🔍 «{text}» bo'yicha {len(results)} ta kino topildi:\n"]
     for movie in results:
         nom = movie.get("nom", "-")
