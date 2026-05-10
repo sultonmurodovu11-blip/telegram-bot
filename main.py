@@ -141,10 +141,7 @@ USER_BTN_SEVIMLI = "❤️ Sevimlilar"
 USER_BTN_PROFIL = "👤 Profil"
 USER_BTN_OBUNA = "📋 Kanallar"
 USER_BTN_ALOQA = "📞 Aloqa"
-USER_BTN_QIDIRUV = "🔍 Kino qidirish"  # YANGI TUGMA
-
-# Qidiruv holati
-SEARCH_WAITING = "search_waiting"
+USER_BTN_QIDIRUV = "🔍 Kino qidirish"
 
 _broadcast_active = False
 _broadcast_status_message_id = None
@@ -599,42 +596,31 @@ def get_verification_keyboard():
 # ===================== KANAL SUBSCRIPTION — CACHE BILAN =====================
 
 async def check_user_subscribed(bot, user_id: int):
-    """Subscription holatini cache bilan tekshiradi — tez ishlaydi."""
     global _subscription_cache
     now = time.time()
-
-    # Cache tekshirish
     if user_id in _subscription_cache:
         cached_time, cached_result, cached_not_sub = _subscription_cache[user_id]
         if now - cached_time < SUBSCRIPTION_CACHE_TTL:
             return cached_result, cached_not_sub
-
     try:
         channels = get_all_required_channels()
     except Exception:
         return True, []
-
     if not channels:
         _subscription_cache[user_id] = (now, True, [])
         return True, []
-
     not_subscribed = []
-    tasks = []
-    for ch in channels:
-        tasks.append(_check_single_channel(bot, user_id, ch))
-
+    tasks = [_check_single_channel(bot, user_id, ch) for ch in channels]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for ch, result in zip(channels, results):
         if isinstance(result, bool) and not result:
             not_subscribed.append(ch)
-
     is_ok = len(not_subscribed) == 0
     _subscription_cache[user_id] = (now, is_ok, not_subscribed)
     return is_ok, not_subscribed
 
 
 async def _check_single_channel(bot, user_id: int, ch: dict):
-    """Bitta kanalga obuna tekshiradi."""
     try:
         member = await bot.get_chat_member(chat_id=ch["channel_id"], user_id=user_id)
         return member.status not in ("left", "kicked", "banned")
@@ -643,7 +629,6 @@ async def _check_single_channel(bot, user_id: int, ch: dict):
 
 
 def invalidate_subscription_cache(user_id: int):
-    """Foydalanuvchi obuna bo'lganda cacheni tozalash."""
     _subscription_cache.pop(user_id, None)
 
 
@@ -775,7 +760,6 @@ def get_tracked_user_count():
 
 
 def remember_user(update):
-    """Foydalanuvchini background'da saqlaydi — bot javobini to'xtatmaydi."""
     user = update.effective_user
     if user is None:
         return
@@ -788,10 +772,9 @@ def remember_user(update):
 # ===================== TUGMALAR =====================
 
 def get_user_menu_keyboard():
-    """Foydalanuvchi uchun asosiy menyu — Qidiruv tugmasi qo'shildi."""
     return ReplyKeyboardMarkup(
         [
-            [USER_BTN_QIDIRUV],                      # Qidiruv — birinchi qatorda katta
+            [USER_BTN_QIDIRUV],
             [USER_BTN_REKLAMA, USER_BTN_YANGI],
             [USER_BTN_SEVIMLI, USER_BTN_PROFIL],
             [USER_BTN_OBUNA, USER_BTN_ALOQA],
@@ -852,7 +835,6 @@ def get_kod_suggestion_keyboard(next_code):
 
 
 def get_search_cancel_keyboard():
-    """Qidiruv rejimida bekor qilish tugmasi."""
     return ReplyKeyboardMarkup(
         [["❌ Qidiruvni bekor qilish"]],
         resize_keyboard=True, one_time_keyboard=True,
@@ -947,7 +929,7 @@ EDIT_KOD, EDIT_NOM, EDIT_SIFAT, EDIT_TIL, EDIT_VAQT = range(9, 14)
 JILD_CODES, JILD_NAME = range(14, 16)
 BC_GET_TEXT, BC_GET_MEDIA, BC_ASK_BUTTON, BC_GET_URL, BC_GET_BTN_NAME, BC_CONFIRM = range(16, 22)
 ADDCH_GET_TITLE = 22
-SEARCH_INPUT = 23  # YANGI — Qidiruv holati
+SEARCH_INPUT = 23
 
 
 async def log_error(update: object, context):
@@ -1022,11 +1004,9 @@ def seconds_to_hhmmss(seconds: int) -> str:
 # ===================== QIDIRUV CONVERSATION =====================
 
 async def search_start(update, context):
-    """🔍 Kino qidirish tugmasi bosilganda."""
     remember_user(update)
     user_id = update.message.from_user.id
 
-    # Obuna tekshiruvi
     is_subscribed, not_subscribed = await check_user_subscribed(context.bot, user_id)
     if not is_subscribed:
         await send_subscribe_required_message(update.message, not_subscribed)
@@ -1047,6 +1027,7 @@ async def search_get_input(update, context):
     text = update.message.text.strip()
     user_id = update.message.from_user.id
 
+    # Bekor qilish
     if text == "❌ Qidiruvni bekor qilish":
         await update.message.reply_text(
             "❌ Qidiruv bekor qilindi.",
@@ -1064,7 +1045,17 @@ async def search_get_input(update, context):
     # Raqam bo'lsa — kod sifatida qidirish
     if text.isdigit():
         code = text
-        result = await _find_and_send_by_code(update.message, code, user_id)
+        try:
+            result = await _find_and_send_by_code(update.message, code, user_id)
+        except Exception:
+            logger.exception("Kod bo'yicha qidirishda xato")
+            # MUHIM: xato bo'lsa conversation tugatiladi
+            await update.message.reply_text(
+                SERVICE_UNAVAILABLE_TEXT,
+                reply_markup=get_user_menu_keyboard(),
+            )
+            return ConversationHandler.END
+
         if result == "not_found":
             await update.message.reply_text(
                 f"❌ <b>{code}</b> kodli kino topilmadi.\n\n"
@@ -1073,16 +1064,10 @@ async def search_get_input(update, context):
                 reply_markup=get_search_cancel_keyboard(),
             )
             return SEARCH_INPUT
-        elif result == "sent":
-            await update.message.reply_text(
-                "✅ Kino yuborildi! Yana qidirish uchun nom yoki kod yozing:",
-                reply_markup=get_search_cancel_keyboard(),
-            )
-            return SEARCH_INPUT
         else:
-            # series yoki folder — conversation tugaydi
+            # sent, series, folder — conversation davom etadi
             await update.message.reply_text(
-                "Qidiruvni davom ettirish uchun yana nom yoki kod yozing:",
+                "Yana qidirish uchun nom yoki kod yozing:",
                 reply_markup=get_search_cancel_keyboard(),
             )
             return SEARCH_INPUT
@@ -1098,9 +1083,13 @@ async def search_get_input(update, context):
     try:
         results = search_movies_by_name(text, limit=15)
     except Exception:
-        logger.exception("Qidirishda xato")
-        await reply_service_unavailable(update)
-        return SEARCH_INPUT
+        logger.exception("Nom bo'yicha qidirishda xato")
+        # MUHIM: xato bo'lsa conversation tugatiladi
+        await update.message.reply_text(
+            SERVICE_UNAVAILABLE_TEXT,
+            reply_markup=get_user_menu_keyboard(),
+        )
+        return ConversationHandler.END
 
     if not results:
         await update.message.reply_text(
@@ -1118,8 +1107,12 @@ async def search_get_input(update, context):
         try:
             data = get_movie(code)
         except Exception:
-            await reply_service_unavailable(update)
-            return SEARCH_INPUT
+            logger.exception("Kino olishda xato")
+            await update.message.reply_text(
+                SERVICE_UNAVAILABLE_TEXT,
+                reply_markup=get_user_menu_keyboard(),
+            )
+            return ConversationHandler.END
         if data:
             increment_view_count(code)
             await send_movie_to_chat(update.message, code, data, user_id=user_id)
@@ -1151,40 +1144,23 @@ async def search_get_input(update, context):
 
 
 async def _find_and_send_by_code(message, code: str, user_id: int) -> str:
-    """Kod bo'yicha topib yuboradi. 'sent', 'not_found', 'series', 'folder' qaytaradi."""
-    try:
-        folder_data = get_folder_by_code(code)
-    except Exception:
-        return "not_found"
-
+    """Kod bo'yicha topib yuboradi. 'sent', 'not_found', 'series', 'folder' qaytaradi.
+    Exception lar caller tomonidan ushlanadi."""
+    folder_data = get_folder_by_code(code)
     if folder_data is not None:
-        try:
-            folder_movies = get_movies_for_folder(folder_data["name"])
-        except Exception:
-            return "not_found"
+        folder_movies = get_movies_for_folder(folder_data["name"])
         if folder_movies:
             await send_folder_parts_prompt(message, folder_data, folder_movies)
             return "folder"
 
-    try:
-        series_data = get_series_range_by_code(code)
-    except Exception:
-        return "not_found"
-
+    series_data = get_series_range_by_code(code)
     if series_data is not None:
-        try:
-            movies = get_movies_in_range(series_data["start_code_num"], series_data["end_code_num"])
-        except Exception:
-            return "not_found"
+        movies = get_movies_in_range(series_data["start_code_num"], series_data["end_code_num"])
         if movies:
             await send_series_parts_prompt(message, series_data, movies)
             return "series"
 
-    try:
-        data = get_movie(code)
-    except Exception:
-        return "not_found"
-
+    data = get_movie(code)
     if not data:
         return "not_found"
 
@@ -1201,7 +1177,6 @@ async def search_cancel(update, context):
 # ===================== GETMOVIE CALLBACK =====================
 
 async def handle_getmovie_callback(update, context):
-    """Qidiruv natijasidan inline tugma bosilganda."""
     remember_user(update)
     query = update.callback_query
     if query is None:
@@ -1770,7 +1745,9 @@ async def admin_help(update, context):
         "Ommaviy xabar: /adminlik, /ochirish\n"
         "Sevimlilar: /sevimli\n\n"
         "Ixtiyoriy kanallar:\n"
-        "OPTIONAL_CHANNELS=https://t.me/kanal|Nomi"
+        "OPTIONAL_CHANNELS=https://t.me/kanal|Nomi\n\n"
+        "Broadcast: /adminlik — matn yozib, tugma bilan yoki tugsiz yuborish\n"
+        "Broadcast tugmasi: kanal linki yoki boshqa URL bo'lishi mumkin"
     )
     await update.message.reply_text(help_text, reply_markup=get_admin_menu_keyboard())
 
@@ -2452,7 +2429,6 @@ async def handle_check_subscription_callback(update, context):
     await query.answer()
     user_id = update.effective_user.id
 
-    # Cacheni o'chirish — yangi tekshirish uchun
     invalidate_subscription_cache(user_id)
 
     is_subscribed, not_subscribed = await check_user_subscribed(context.bot, user_id)
@@ -2862,7 +2838,8 @@ def build_application():
         allow_reentry=True,
     )
 
-    # YANGI — Qidiruv conversation (foydalanuvchilar uchun)
+    # Qidiruv conversation — foydalanuvchilar uchun
+    # MUHIM: conversation state ichida xato bo'lsa END qaytaradi
     search_conv = ConversationHandler(
         entry_points=[
             MessageHandler(
@@ -2877,10 +2854,14 @@ def build_application():
         },
         fallbacks=[
             CommandHandler("cancel", search_cancel),
-            MessageHandler(filters.Regex("^❌ Qidiruvni bekor qilish$"), search_cancel),
+            MessageHandler(
+                filters.TEXT & filters.Regex("^❌ Qidiruvni bekor qilish$") & ~filters.User(ADMIN_ID),
+                search_cancel,
+            ),
         ],
         allow_reentry=True,
         per_message=False,
+        # conversation_timeout emas, lekin xato bo'lsa END qaytaradi
     )
 
     # Commandlar
@@ -2897,8 +2878,8 @@ def build_application():
     app.add_handler(CommandHandler("kanallar", admin_channels_stat))
     app.add_handler(CommandHandler("barchasi", admin_all_movies))
 
-    # Conversation handlerlar
-    app.add_handler(search_conv)     # Qidiruv — birinchi (muhim)
+    # Conversation handlerlar — search_conv BIRINCHI bo'lishi SHART
+    app.add_handler(search_conv)
     app.add_handler(conv)
     app.add_handler(edit_conv)
     app.add_handler(jild_conv)
@@ -2912,7 +2893,7 @@ def build_application():
     app.add_handler(CallbackQueryHandler(handle_favorite_callback, pattern="^fav:"))
     app.add_handler(CallbackQueryHandler(admin_broadcast_stop_callback, pattern="^stop_broadcast$"))
     app.add_handler(CallbackQueryHandler(admin_delete_bc_callback, pattern="^del_bc:"))
-    app.add_handler(CallbackQueryHandler(handle_getmovie_callback, pattern="^getmovie:"))  # YANGI
+    app.add_handler(CallbackQueryHandler(handle_getmovie_callback, pattern="^getmovie:"))
 
     # Kanal join tracking
     app.add_handler(ChatMemberHandler(handle_channel_join_update, ChatMemberHandler.CHAT_MEMBER))
