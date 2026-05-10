@@ -24,7 +24,7 @@ VERIFICATION_WAIT_SECONDS = 15
 
 # ===================== ALOQA MA'LUMOTLARI =====================
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "@Ulugbeck_dev").strip()
-ADMIN_PHONE = os.environ.get("ADMIN_PHONE", "+998946662211").strip()
+ADMIN_PHONE = os.environ.get("ADMIN_PHONE", "+998941444654").strip()
 
 # ===================== IXTIYORIY KANALLAR (Obuna tugmasi uchun) =====================
 # Format: "https://t.me/kanal1|Kanal nomi 1,https://t.me/kanal2|Kanal nomi 2"
