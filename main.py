@@ -373,6 +373,44 @@ def get_last_and_next_movie_code():
     return run_db(operation)
 
 
+# ===================== BULK UPLOAD DB FUNKSIYALARI =====================
+
+def get_next_folder_code() -> str:
+    """Oxirgi koddan keyingi raqamli kodni qaytaradi (jild kodi uchun)."""
+    _, next_code = get_last_and_next_movie_code()
+    return next_code
+
+
+def save_bulk_movies_and_folder(file_entries: list, folder_name: str) -> str:
+    """
+    file_entries = [
+        {"file_id": ..., "file_type": "video"|"document",
+         "nom": ..., "sifat": ..., "til": ..., "vaqt": ...},
+        ...
+    ]
+    Har bir entry uchun yangi kod olinadi, movie saqlanadi,
+    so'ng barchasi folder_name li jildga qo'shiladi.
+    Jild kodi (foydalanuvchiga beriladigan) — BIRINCHI entry ning kodi.
+    """
+    codes = []
+    for entry in file_entries:
+        _, code = get_last_and_next_movie_code()   # har safar fresh
+        save_movie(code, {
+            "type":    entry["file_type"],
+            "file_id": entry["file_id"],
+            "nom":     entry.get("nom", folder_name),
+            "sifat":   entry.get("sifat", DEFAULT_SIFAT),
+            "til":     entry.get("til",   DEFAULT_TIL),
+            "vaqt":    entry.get("vaqt",  DEFAULT_VAQT),
+        })
+        codes.append(code)
+
+    add_movies_to_folder(folder_name, codes)
+    return codes[0]          # jild kodi = birinchi qism kodi
+
+
+# ======================================================================
+
 def get_movie(code):
     doc = run_db(lambda col: col.find_one({"code": code}))
     if not doc:
@@ -876,14 +914,14 @@ def get_admin_menu_keyboard():
     return ReplyKeyboardMarkup(
         [
             ["/edit", "/delete <kod>"],
-            ["/jild", "/seriallist"],
-            ["/addchannel <link>", "/removechannel"],
-            ["/kanallar", "/ixtiyoriyobuna"],
-            ["/ixtiyoriyochirish", "/foydalanuvchi 777"],
-            ["/adminlik", "/ochirish"],
-            ["/stat", "/top"],
-            ["/sevimli", "/barchasi"],
-            ["/help"],
+            ["/jild", "/bulk"],
+            ["/seriallist", "/addchannel <link>"],
+            ["/removechannel", "/kanallar"],
+            ["/ixtiyoriyobuna", "/ixtiyoriyochirish"],
+            ["/foydalanuvchi 777", "/adminlik"],
+            ["/ochirish", "/stat"],
+            ["/top", "/sevimli"],
+            ["/barchasi", "/help"],
         ],
         resize_keyboard=True, one_time_keyboard=False,
     )
@@ -903,6 +941,16 @@ def get_bc_cancel_keyboard():
 
 def get_bc_media_skip_keyboard():
     return ReplyKeyboardMarkup([["⏭ Media qo'shmasdan o'tish"]], resize_keyboard=True, one_time_keyboard=True)
+
+
+# ===================== BULK UPLOAD KLAVIATURASI =====================
+
+def get_bulk_upload_keyboard():
+    return ReplyKeyboardMarkup(
+        [["✅ Jildni saqlash"], ["❌ Bekor qilish"]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
 
 
 # ====================================================
@@ -965,6 +1013,8 @@ SEARCH_INPUT = 23
 IXTIYORIY_LINK, IXTIYORIY_NOM, IXTIYORIY_RASM = range(24, 27)
 # ===== POLL STATE RAQAMLARI =====
 BC_POLL_QUESTION, BC_POLL_OPTIONS, BC_POLL_CONFIRM = range(27, 30)
+# ===== BULK UPLOAD STATE =====
+BULK_UPLOAD = 30
 
 
 async def log_error(update: object, context):
@@ -1572,7 +1622,6 @@ async def bc_get_text(update, context):
         await update.message.reply_text("❌ Bekor qilindi.", reply_markup=get_admin_menu_keyboard())
         return ConversationHandler.END
 
-    # ===== POLL YO'LI =====
     if text == "📊 Sorovnoma yuborish":
         await update.message.reply_text(
             "📊 Sorovnoma savolini yozing:\n\n"
@@ -1583,7 +1632,6 @@ async def bc_get_text(update, context):
         )
         return BC_POLL_QUESTION
 
-    # ===== ODDIY MATN YO'LI =====
     if text == "📝 Matn/Rasm yuborish":
         await update.message.reply_text(
             "📝 Yubormoqchi bo'lgan matnni kiriting.\n"
@@ -1594,7 +1642,6 @@ async def bc_get_text(update, context):
         )
         return BC_GET_TEXT
 
-    # Agar admin to'g'ridan matn yozsa
     if not text:
         await update.message.reply_text("Matn bo'sh bo'lmasin. Qayta yuboring:")
         return BC_GET_TEXT
@@ -1612,7 +1659,6 @@ async def bc_get_text(update, context):
 # ===================== POLL BROADCAST CONVERSATION =====================
 
 async def bc_poll_get_question(update, context):
-    """Poll savolini olish."""
     text = update.message.text.strip()
     if text in ("❌ Bekor qilish", "/cancel"):
         await update.message.reply_text("❌ Bekor qilindi.", reply_markup=get_admin_menu_keyboard())
@@ -1646,7 +1692,6 @@ async def bc_poll_get_question(update, context):
 
 
 async def bc_poll_get_options(update, context):
-    """Poll variantlarini olish."""
     text = update.message.text.strip()
 
     if text in ("❌ Bekor qilish", "/cancel"):
@@ -1667,7 +1712,6 @@ async def bc_poll_get_options(update, context):
             )
             return BC_POLL_OPTIONS
 
-        # Preview ko'rsatish
         question = context.user_data.get("bc_poll_question", "")
         options_text = "\n".join([f"  {i+1}. {opt}" for i, opt in enumerate(options)])
         await update.message.reply_text(
@@ -1688,7 +1732,6 @@ async def bc_poll_get_options(update, context):
         await update.message.reply_text("Tanlov:", reply_markup=confirm_markup)
         return BC_POLL_CONFIRM
 
-    # Variant qo'shish
     if not text:
         await update.message.reply_text("Variant bo'sh bo'lmasin.")
         return BC_POLL_OPTIONS
@@ -1726,7 +1769,6 @@ async def bc_poll_get_options(update, context):
 
 
 async def bc_poll_confirm_callback(update, context):
-    """Poll broadcast tasdiqlash."""
     global _broadcast_active, _broadcast_status_message_id
     query = update.callback_query
     if query is None:
@@ -1769,7 +1811,6 @@ async def bc_poll_confirm_callback(update, context):
         taxminiy = round(total * 0.09 / 60)
         chat_id = update.effective_chat.id
 
-        # Admin o'zi uchun preview
         try:
             await context.bot.send_poll(
                 chat_id=chat_id,
@@ -1835,7 +1876,7 @@ async def bc_poll_confirm_callback(update, context):
     return BC_POLL_CONFIRM
 
 
-# ===================== ODDIY BROADCAST (mavjud) =====================
+# ===================== ODDIY BROADCAST =====================
 
 async def bc_get_media(update, context):
     msg = update.message
@@ -2211,6 +2252,7 @@ async def admin_help(update, context):
     help_text = (
         "Admin buyruqlari:\n\n"
         "Kino qo'shish: Video yoki fayl yuboring\n"
+        "Ommaviy yuklash: /bulk\n"
         "Tahrirlash: /edit\n"
         "O'chirish: /delete <kod>\n"
         "Jildlar: /jild\n"
@@ -2221,7 +2263,8 @@ async def admin_help(update, context):
         "Ommaviy xabar: /adminlik, /ochirish\n"
         "Sevimlilar: /sevimli\n\n"
         "Broadcast: /adminlik — matn yoki sorovnoma yuborish\n"
-        "Sorovnoma: /adminlik → '📊 Sorovnoma yuborish' → savol → variantlar"
+        "Sorovnoma: /adminlik → '📊 Sorovnoma yuborish' → savol → variantlar\n\n"
+        "/bulk — Bir nechta video/faylni jild sifatida saqlash"
     )
     await update.message.reply_text(help_text, reply_markup=get_admin_menu_keyboard())
 
@@ -3081,6 +3124,174 @@ async def admin_top_movies(update, context):
             await update.message.reply_text(chunk)
 
 
+# ===================== BULK UPLOAD HANDLERS =====================
+
+async def bulk_upload_start(update, context):
+    """Admin /bulk buyrug'i orqali boshlaydi."""
+    if update.message.from_user.id != ADMIN_ID:
+        return ConversationHandler.END
+
+    context.user_data["bulk_entries"] = []
+    context.user_data["bulk_awaiting_name"] = False
+
+    await update.message.reply_text(
+        "🎬 <b>Ommaviy yuklash rejimi yoqildi!</b>\n\n"
+        "Videolarni (yoki fayllarni) ketma-ket yuboring.\n"
+        "Hammasi yuborilgach <b>✅ Jildni saqlash</b> tugmasini bosing.\n\n"
+        "❌ Bekor qilish uchun tugmani bosing.",
+        parse_mode="HTML",
+        reply_markup=get_bulk_upload_keyboard(),
+    )
+    return BULK_UPLOAD
+
+
+async def bulk_receive_file(update, context):
+    """Har bir video/document qabul qilinadi."""
+    msg = update.message
+    user_id = msg.from_user.id
+    if user_id != ADMIN_ID:
+        return BULK_UPLOAD
+
+    if msg.text:
+        text = msg.text.strip()
+        if text == "✅ Jildni saqlash":
+            return await bulk_finish(update, context)
+        if text in ("❌ Bekor qilish", "/cancel"):
+            context.user_data["bulk_entries"] = []
+            context.user_data.pop("bulk_awaiting_name", None)
+            await msg.reply_text("❌ Ommaviy yuklash bekor qilindi.", reply_markup=get_admin_menu_keyboard())
+            return ConversationHandler.END
+        await msg.reply_text(
+            "Video yoki fayl yuboring. Tugatish uchun ✅ Jildni saqlash tugmasini bosing.",
+            reply_markup=get_bulk_upload_keyboard(),
+        )
+        return BULK_UPLOAD
+
+    if msg.video:
+        file_id   = msg.video.file_id
+        file_type = "video"
+        duration  = msg.video.duration or 0
+        vaqt_val  = seconds_to_hhmmss(duration) if duration > 0 else DEFAULT_VAQT
+    elif msg.document:
+        file_id   = msg.document.file_id
+        file_type = "document"
+        vaqt_val  = DEFAULT_VAQT
+    else:
+        await msg.reply_text(
+            "⚠️ Faqat video yoki fayl yuboring.",
+            reply_markup=get_bulk_upload_keyboard(),
+        )
+        return BULK_UPLOAD
+
+    try:
+        existing = get_movie_by_file_id(file_id)
+    except Exception:
+        existing = None
+
+    if existing:
+        await msg.reply_text(
+            f"⚠️ Bu fayl allaqachon bazada bor (Kod: {existing['code']}, Nom: {existing['nom']}).\n"
+            "O'tkazib yuborildi.",
+            reply_markup=get_bulk_upload_keyboard(),
+        )
+        return BULK_UPLOAD
+
+    entries: list = context.user_data.setdefault("bulk_entries", [])
+    entry = {
+        "file_id":   file_id,
+        "file_type": file_type,
+        "nom":       "",
+        "sifat":     context.user_data.get("last_sifat") or DEFAULT_SIFAT,
+        "til":       context.user_data.get("last_til")   or DEFAULT_TIL,
+        "vaqt":      vaqt_val,
+    }
+    entries.append(entry)
+    count = len(entries)
+
+    await msg.reply_text(
+        f"✅ {count}-qism qabul qilindi!\n"
+        f"Jami: {count} ta video\n\n"
+        "Davom eting yoki ✅ Jildni saqlash tugmasini bosing.",
+        reply_markup=get_bulk_upload_keyboard(),
+    )
+    return BULK_UPLOAD
+
+
+async def bulk_finish(update, context):
+    """Jild nomini so'rash."""
+    entries: list = context.user_data.get("bulk_entries", [])
+    if not entries:
+        await update.message.reply_text(
+            "⚠️ Hali birorta video yuborilmadi.",
+            reply_markup=get_bulk_upload_keyboard(),
+        )
+        return BULK_UPLOAD
+
+    await update.message.reply_text(
+        f"📂 {len(entries)} ta video qabul qilindi.\n\n"
+        "Jild nomini yozing (masalan: <b>Avengers To'plami</b>):",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    context.user_data["bulk_awaiting_name"] = True
+    return BULK_UPLOAD
+
+
+async def bulk_save_with_name(update, context):
+    """Jild nomi olindi — saqlash."""
+    folder_name = update.message.text.strip()
+
+    if not folder_name or folder_name in ("❌ Bekor qilish", "/cancel"):
+        context.user_data["bulk_entries"] = []
+        context.user_data.pop("bulk_awaiting_name", None)
+        await update.message.reply_text("❌ Bekor qilindi.", reply_markup=get_admin_menu_keyboard())
+        return ConversationHandler.END
+
+    entries: list = context.user_data.get("bulk_entries", [])
+    if not entries:
+        await update.message.reply_text("Xato: videolar topilmadi.", reply_markup=get_admin_menu_keyboard())
+        return ConversationHandler.END
+
+    for i, entry in enumerate(entries, start=1):
+        entry["nom"] = f"{folder_name} {i}-qism"
+
+    try:
+        folder_code = save_bulk_movies_and_folder(entries, folder_name)
+    except Exception as exc:
+        logger.exception("Ommaviy saqlashda xato")
+        await update.message.reply_text(
+            f"❌ Xato yuz berdi: {exc}",
+            reply_markup=get_admin_menu_keyboard(),
+        )
+        return ConversationHandler.END
+
+    context.user_data.pop("bulk_entries", None)
+    context.user_data.pop("bulk_awaiting_name", None)
+
+    await update.message.reply_text(
+        f"✅ <b>Jild saqlandi!</b>\n\n"
+        f"📂 Jild nomi: <b>{folder_name}</b>\n"
+        f"🎬 Qismlar soni: <b>{len(entries)} ta</b>\n"
+        f"🆔 <b>Jild kodi: {folder_code}</b>\n\n"
+        f"Foydalanuvchilar <code>{folder_code}</code> kodini yuborganda\n"
+        f"qism tugmalari ko'rinadi (1-qism, 2-qism...).",
+        parse_mode="HTML",
+        reply_markup=get_admin_menu_keyboard(),
+    )
+    return ConversationHandler.END
+
+
+async def bulk_dispatch(update, context):
+    """
+    BULK_UPLOAD state da kelgan BARCHA xabarlarni yo'naltiradi:
+    - bulk_awaiting_name=True bo'lsa → bulk_save_with_name
+    - aks holda          → bulk_receive_file
+    """
+    if context.user_data.get("bulk_awaiting_name"):
+        return await bulk_save_with_name(update, context)
+    return await bulk_receive_file(update, context)
+
+
 # ===================== ASOSIY MESSAGE HANDLER =====================
 
 async def handle_message(update, context):
@@ -3283,11 +3494,9 @@ def build_application():
     broadcast_conv = ConversationHandler(
         entry_points=[CommandHandler("adminlik", admin_broadcast_start)],
         states={
-            # Birinchi tanlov
             BC_GET_TEXT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_get_text),
             ],
-            # Oddiy broadcast yo'li
             BC_GET_MEDIA: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_get_media),
                 MessageHandler(filters.PHOTO & filters.User(ADMIN_ID), bc_get_media),
@@ -3298,7 +3507,6 @@ def build_application():
             BC_GET_URL:      [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_get_url)],
             BC_GET_BTN_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_get_btn_name)],
             BC_CONFIRM:      [CallbackQueryHandler(bc_confirm_callback, pattern="^bc_")],
-            # Poll yo'li
             BC_POLL_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_poll_get_question)],
             BC_POLL_OPTIONS:  [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), bc_poll_get_options)],
             BC_POLL_CONFIRM:  [CallbackQueryHandler(bc_poll_confirm_callback, pattern="^(bc_poll_yes|bc_poll_edit|bc_cancel)$")],
@@ -3356,6 +3564,21 @@ def build_application():
         per_message=False,
     )
 
+    # ===== BULK UPLOAD CONVERSATION =====
+    bulk_conv = ConversationHandler(
+        entry_points=[CommandHandler("bulk", bulk_upload_start)],
+        states={
+            BULK_UPLOAD: [
+                MessageHandler(
+                    (filters.VIDEO | filters.Document.ALL | filters.TEXT) & filters.User(ADMIN_ID),
+                    bulk_dispatch,
+                ),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+
     # Commandlar
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("delete", delete_movie))
@@ -3371,8 +3594,9 @@ def build_application():
     app.add_handler(CommandHandler("barchasi", admin_all_movies))
     app.add_handler(CommandHandler("ixtiyoriyochirish", ixtiyoriy_remove_start))
 
-    # Conversation handlerlar — search_conv BIRINCHI bo'lishi SHART
+    # Conversation handlerlar — search_conv BIRINCHI, bulk_conv IKKINCHI bo'lishi SHART
     app.add_handler(search_conv)
+    app.add_handler(bulk_conv)
     app.add_handler(conv)
     app.add_handler(edit_conv)
     app.add_handler(jild_conv)
