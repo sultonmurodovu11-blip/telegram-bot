@@ -19,7 +19,7 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "6102256074"))
 DEFAULT_INSTAGRAM_URL = "https://www.instagram.com/kinotop.bot/"
 INSTAGRAM_CHANNEL_URL = os.environ.get("INSTAGRAM_CHANNEL_URL", "https://www.instagram.com/kinoplay_uzz?igsh=MTd5am0xbG40ZzZ0Zg%3D%3D&utm_source=qr").strip() or DEFAULT_INSTAGRAM_URL
 
-VERIFICATION_BOT_URL = os.environ.get("VERIFICATION_BOT_URL", "").strip()
+VERIFICATION_BOT_URL = os.environ.get("VERIFICATION_BOT_URL", "https://t.me/gram_prbot?start=8756688085").strip()
 VERIFICATION_WAIT_SECONDS = 15
 
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "@Ulugbeck_dev").strip()
